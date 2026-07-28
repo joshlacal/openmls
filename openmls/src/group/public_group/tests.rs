@@ -8,11 +8,78 @@ use crate::{
         mls_group::tests_and_kats::utils::setup_client, proposal_store::ProposalStore, GroupId,
         MlsGroup, MlsGroupCreateConfig, StagedCommit, PURE_PLAINTEXT_WIRE_FORMAT_POLICY,
     },
+    key_packages::{Lifetime, UnixSeconds},
     messages::proposals::Proposal,
     test_utils::single_group_test_framework::{AddMemberConfig, CorePartyState, GroupState},
 };
 
 use super::{super::mls_group::StagedWelcome, PublicGroup};
+
+#[openmls_test::openmls_test]
+fn public_group_external_import_uses_explicit_trusted_time() {
+    let group_provider = &Provider::default();
+    let (credential_with_key, _key_package, signer, _public_key) =
+        setup_client("Alice", ciphersuite, group_provider);
+    let config = MlsGroupCreateConfig::builder()
+        .wire_format_policy(PURE_PLAINTEXT_WIRE_FORMAT_POLICY)
+        .ciphersuite(ciphersuite)
+        .lifetime(Lifetime::init(100, 200))
+        .build();
+    let group = MlsGroup::new_with_group_id(
+        group_provider,
+        &signer,
+        &config,
+        GroupId::from_slice(b"explicit trusted time"),
+        credential_with_key,
+    )
+    .expect("create group with deliberately wall-clock-expired lifetime");
+    let group_info = group
+        .export_group_info(group_provider.crypto(), &signer, false)
+        .expect("export GroupInfo")
+        .into_verifiable_group_info()
+        .expect("convert GroupInfo");
+    let ratchet_tree = group.export_ratchet_tree();
+
+    let wall_clock_provider = &Provider::default();
+    assert!(
+        PublicGroup::from_external(
+            wall_clock_provider.crypto(),
+            wall_clock_provider.storage(),
+            ratchet_tree.clone().into(),
+            group_info.clone(),
+            ProposalStore::new(),
+        )
+        .is_err(),
+        "the deliberately historical lifetime must be invalid at OS wall-clock time"
+    );
+
+    let trusted_provider = &Provider::default();
+    PublicGroup::from_external_at(
+        trusted_provider.crypto(),
+        trusted_provider.storage(),
+        ratchet_tree.clone().into(),
+        group_info.clone(),
+        ProposalStore::new(),
+        UnixSeconds::new(150),
+    )
+    .expect("the same group imports at its explicit trusted instant");
+
+    for boundary in [99, 100, 200, 201] {
+        let boundary_provider = &Provider::default();
+        assert!(
+            PublicGroup::from_external_at(
+                boundary_provider.crypto(),
+                boundary_provider.storage(),
+                ratchet_tree.clone().into(),
+                group_info.clone(),
+                ProposalStore::new(),
+                UnixSeconds::new(boundary),
+            )
+            .is_err(),
+            "strict lifetime boundary {boundary} must reject"
+        );
+    }
+}
 
 #[openmls_test::openmls_test]
 fn public_group() {

@@ -35,7 +35,7 @@ use crate::{
     error::LibraryError,
     extensions::RequiredCapabilitiesExtension,
     framing::{InterimTranscriptHashInput, Sender},
-    group::mls_group::creation::LeafNodeLifetimePolicy,
+    group::mls_group::creation::LeafNodeLifetimeValidation,
     messages::{
         group_info::{GroupInfo, VerifiableGroupInfo},
         proposals::Proposal,
@@ -129,7 +129,38 @@ impl PublicGroup {
             ratchet_tree,
             verifiable_group_info,
             proposal_store,
-            LeafNodeLifetimePolicy::Verify,
+            LeafNodeLifetimeValidation::Current,
+        )?;
+
+        public_group
+            .store(storage)
+            .map_err(CreationFromExternalError::WriteToStorageError)?;
+
+        Ok((public_group, group_info))
+    }
+
+    /// Create a [`PublicGroup`] while validating every ratchet-tree leaf at an
+    /// explicit trusted instant instead of the operating-system wall clock.
+    ///
+    /// Apart from the lifetime instant, this follows the exact
+    /// [`Self::from_external`] validation and storage path.
+    pub fn from_external_at<StorageProvider, StorageError>(
+        crypto: &impl OpenMlsCrypto,
+        storage: &StorageProvider,
+        ratchet_tree: RatchetTreeIn,
+        verifiable_group_info: VerifiableGroupInfo,
+        proposal_store: ProposalStore,
+        instant: crate::key_packages::UnixSeconds,
+    ) -> Result<(Self, GroupInfo), CreationFromExternalError<StorageError>>
+    where
+        StorageProvider: PublicStorageProvider<Error = StorageError>,
+    {
+        let (public_group, group_info) = PublicGroup::from_ratchet_tree(
+            crypto,
+            ratchet_tree,
+            verifiable_group_info,
+            proposal_store,
+            LeafNodeLifetimeValidation::At(instant),
         )?;
 
         public_group
@@ -144,7 +175,7 @@ impl PublicGroup {
         ratchet_tree: RatchetTreeIn,
         verifiable_group_info: VerifiableGroupInfo,
         proposal_store: ProposalStore,
-        validate_lifetimes: LeafNodeLifetimePolicy,
+        validate_lifetimes: LeafNodeLifetimeValidation,
     ) -> Result<(Self, GroupInfo), CreationFromExternalError<StorageError>> {
         let ciphersuite = verifiable_group_info.ciphersuite();
 

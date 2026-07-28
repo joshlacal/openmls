@@ -55,6 +55,26 @@ pub struct Lifetime {
     not_after: u64,
 }
 
+/// A trusted whole-second instant measured from the Unix epoch.
+///
+/// This type is deliberately clock-free: callers that use an explicit-time
+/// validation API must first obtain and seal the instant in their own trust
+/// domain.
+#[derive(PartialEq, Eq, Copy, Clone, Debug)]
+pub struct UnixSeconds(u64);
+
+impl UnixSeconds {
+    /// Construct an explicit Unix-epoch instant.
+    pub const fn new(value: u64) -> Self {
+        Self(value)
+    }
+
+    /// Return the wrapped number of whole seconds.
+    pub const fn get(self) -> u64 {
+        self.0
+    }
+}
+
 impl Lifetime {
     /// Create a new lifetime with lifetime `t` (in seconds).
     /// Note that the lifetime is extended 1h into the past to adapt to skewed
@@ -95,6 +115,13 @@ impl Lifetime {
         }
     }
 
+    /// Returns true when this lifetime contains the explicit trusted instant.
+    ///
+    /// The MLS lifetime bounds are strict, matching [`Self::is_valid`].
+    pub fn is_valid_at(&self, instant: UnixSeconds) -> bool {
+        self.not_before < instant.get() && instant.get() < self.not_after
+    }
+
     /// ValSem(openmls/annotations#32):
     /// Applications MUST define a maximum total lifetime that is acceptable for a LeafNode,
     /// and reject any LeafNode where the total lifetime is longer than this duration.
@@ -123,7 +150,7 @@ impl Default for Lifetime {
 mod tests {
     use tls_codec::{Deserialize, Serialize};
 
-    use super::Lifetime;
+    use super::{Lifetime, UnixSeconds};
 
     #[test]
     fn lifetime() {
@@ -143,5 +170,17 @@ mod tests {
         let ext_deserialized = Lifetime::tls_deserialize(&mut serialized.as_slice())
             .expect("Error deserializing lifetime");
         assert!(!ext_deserialized.is_valid());
+    }
+
+    #[test]
+    fn explicit_time_validation_uses_strict_bounds() {
+        let lifetime = Lifetime::init(10, 20);
+
+        assert!(!lifetime.is_valid_at(UnixSeconds::new(9)));
+        assert!(!lifetime.is_valid_at(UnixSeconds::new(10)));
+        assert!(lifetime.is_valid_at(UnixSeconds::new(11)));
+        assert!(lifetime.is_valid_at(UnixSeconds::new(19)));
+        assert!(!lifetime.is_valid_at(UnixSeconds::new(20)));
+        assert!(!lifetime.is_valid_at(UnixSeconds::new(21)));
     }
 }

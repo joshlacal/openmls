@@ -166,7 +166,7 @@ impl ExternalCommitBuilder {
             ratchet_tree,
             verifiable_group_info,
             ProposalStore::new(),
-            validate_lifetimes,
+            validate_lifetimes.into(),
         )?;
         let group_context = public_group.group_context();
 
