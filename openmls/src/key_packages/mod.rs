@@ -132,7 +132,7 @@ pub(crate) mod tests;
 
 // Public types
 pub use key_package_in::KeyPackageIn;
-pub use lifetime::Lifetime;
+pub use lifetime::{Lifetime, UnixSeconds};
 #[cfg(feature = "virtual-clients-draft")]
 pub use vc::{VcKeyPackageBatch, VcKeyPackageBatchBuilder};
 

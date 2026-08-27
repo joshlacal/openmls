@@ -333,7 +333,7 @@ impl ProcessedWelcome {
             ratchet_tree,
             self.verifiable_group_info.clone(),
             ProposalStore::new(),
-            validate_lifetimes,
+            validate_lifetimes.into(),
         )?;
 
         // Find our own leaf in the tree. On the bundle path this is the leaf
@@ -952,7 +952,7 @@ impl MlsGroup {
             ratchet_tree,
             verifiable_group_info,
             ProposalStore::new(),
-            LeafNodeLifetimePolicy::default(),
+            LeafNodeLifetimePolicy::default().into(),
         )?;
 
         // Assemble a transient group at the prior epoch. Its epoch secrets are
@@ -1082,7 +1082,7 @@ impl MlsGroup {
             ratchet_tree,
             verifiable_group_info,
             ProposalStore::new(),
-            LeafNodeLifetimePolicy::default(),
+            LeafNodeLifetimePolicy::default().into(),
         )?;
         let ciphersuite = public_group.ciphersuite();
 
@@ -1269,6 +1269,22 @@ pub enum LeafNodeLifetimePolicy {
 
     /// Skip the verification of the lifeimte in leaf nodes in the ratchet tree.
     Skip,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum LeafNodeLifetimeValidation {
+    Current,
+    At(crate::key_packages::UnixSeconds),
+    Skip,
+}
+
+impl From<LeafNodeLifetimePolicy> for LeafNodeLifetimeValidation {
+    fn from(value: LeafNodeLifetimePolicy) -> Self {
+        match value {
+            LeafNodeLifetimePolicy::Verify => Self::Current,
+            LeafNodeLifetimePolicy::Skip => Self::Skip,
+        }
+    }
 }
 
 /// Builder for joining a group.

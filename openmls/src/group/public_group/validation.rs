@@ -14,7 +14,7 @@ use crate::{
         Sender, WireFormat,
     },
     group::{
-        creation::LeafNodeLifetimePolicy,
+        creation::LeafNodeLifetimeValidation,
         errors::{ExternalCommitValidationError, ProposalValidationError, ValidationError},
         past_secrets::MessageSecretsStore,
         proposal_store::ProposalQueue,
@@ -846,7 +846,7 @@ impl PublicGroup {
         leaf_node: &crate::treesync::LeafNode,
     ) -> Result<(), LeafNodeValidationError> {
         // Call the validation function and validate the lifetime
-        self.validate_leaf_node_inner(leaf_node, LeafNodeLifetimePolicy::Verify)
+        self.validate_leaf_node_inner(leaf_node, LeafNodeLifetimeValidation::Current)
     }
 
     /// Validate a leaf node.
@@ -855,7 +855,7 @@ impl PublicGroup {
     pub(crate) fn validate_leaf_node_inner(
         &self,
         leaf_node: &crate::treesync::LeafNode,
-        validate_lifetimes: LeafNodeLifetimePolicy,
+        validate_lifetimes: LeafNodeLifetimeValidation,
     ) -> Result<(), LeafNodeValidationError> {
         // https://validation.openmls.tech/#valn0103
         // https://validation.openmls.tech/#valn0104
@@ -879,11 +879,19 @@ impl PublicGroup {
         //
         // Some KATs use key packages that are expired by now. In order to run these tests, we
         // provide a way to turn off this check.
-        if matches!(validate_lifetimes, LeafNodeLifetimePolicy::Verify)
-            && !crate::skip_validation::is_disabled::leaf_node_lifetime()
-        {
-            if let Some(lifetime) = leaf_node.life_time() {
-                lifetime.validate()?;
+        if !crate::skip_validation::is_disabled::leaf_node_lifetime() {
+            match validate_lifetimes {
+                LeafNodeLifetimeValidation::Current => {
+                    if let Some(lifetime) = leaf_node.life_time() {
+                        lifetime.validate()?;
+                    }
+                }
+                LeafNodeLifetimeValidation::At(instant) => {
+                    if let Some(lifetime) = leaf_node.life_time() {
+                        lifetime.validate_at(instant)?;
+                    }
+                }
+                LeafNodeLifetimeValidation::Skip => {}
             }
         }
 

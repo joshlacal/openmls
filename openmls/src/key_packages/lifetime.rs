@@ -39,6 +39,18 @@ const MAX_LEAF_NODE_LIFETIME_RANGE_SECONDS: u64 =
 ///     uint64 not_after;
 /// } Lifetime;
 /// ```
+#[derive(PartialEq, Eq, Copy, Clone, Debug)]
+pub struct UnixSeconds(u64);
+
+impl UnixSeconds {
+    pub const fn new(value: u64) -> Self {
+        Self(value)
+    }
+    pub const fn get(self) -> u64 {
+        self.0
+    }
+}
+
 #[derive(
     PartialEq,
     Eq,
@@ -104,6 +116,24 @@ impl Lifetime {
             Err(LifetimeError::NotValidYet {
                 not_before: self.not_before,
                 now: duration_since_unix_epoch,
+            })
+        } else {
+            Ok(())
+        }
+    }
+    /// Returns a [`LifetimeError`] if the lifetime is not strictly valid at the given
+    /// instant (`not_before < instant < not_after`).
+    pub fn validate_at(&self, instant: UnixSeconds) -> Result<(), LifetimeError> {
+        let now = instant.get();
+        if self.not_after <= now {
+            Err(LifetimeError::Expired {
+                not_after: self.not_after,
+                now,
+            })
+        } else if self.not_before >= now {
+            Err(LifetimeError::NotValidYet {
+                not_before: self.not_before,
+                now,
             })
         } else {
             Ok(())
@@ -175,5 +205,17 @@ mod tests {
         ext_deserialized
             .validate_with_time(now_plus_1s)
             .expect_err("Lifetime should be expired");
+    }
+
+    #[test]
+    fn explicit_time_validation_uses_strict_bounds() {
+        use super::UnixSeconds;
+        let lifetime = Lifetime::init(10, 20);
+        assert!(lifetime.validate_at(UnixSeconds::new(9)).is_err());
+        assert!(lifetime.validate_at(UnixSeconds::new(10)).is_err());
+        assert!(lifetime.validate_at(UnixSeconds::new(11)).is_ok());
+        assert!(lifetime.validate_at(UnixSeconds::new(19)).is_ok());
+        assert!(lifetime.validate_at(UnixSeconds::new(20)).is_err());
+        assert!(lifetime.validate_at(UnixSeconds::new(21)).is_err());
     }
 }

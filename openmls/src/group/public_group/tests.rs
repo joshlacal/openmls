@@ -615,3 +615,542 @@ fn external_join_with_nested_unmerged_leaves() {
         "the tree has no non-blank intermediate node between an unmerged leaf and its parent"
     );
 }
+
+#[openmls_test::openmls_test]
+fn public_group_external_import_uses_explicit_trusted_time() {
+    let _lock = crate::skip_validation::checks::leaf_node_lifetime::handle();
+    use crate::key_packages::{Lifetime, UnixSeconds};
+    let alice_provider = &Provider::default();
+    let public_provider = &Provider::default();
+
+    let group_id = GroupId::from_slice(b"Trusted Time Group");
+    let (alice_credential_with_key, _alice_kpb, alice_signer, _alice_pk) =
+        setup_client("Alice", ciphersuite, alice_provider);
+
+    let mls_group_create_config = MlsGroupCreateConfig::builder()
+        .wire_format_policy(PURE_PLAINTEXT_WIRE_FORMAT_POLICY)
+        .ciphersuite(ciphersuite)
+        .lifetime(Lifetime::init(100, 200))
+        .build();
+
+    let alice_group = MlsGroup::new_with_group_id(
+        alice_provider,
+        &alice_signer,
+        &mls_group_create_config,
+        group_id,
+        alice_credential_with_key,
+    )
+    .expect("An unexpected error occurred.");
+
+    let verifiable_group_info = alice_group
+        .export_group_info(alice_provider.crypto(), &alice_signer, false)
+        .unwrap()
+        .into_verifiable_group_info()
+        .unwrap();
+    let ratchet_tree = alice_group.export_ratchet_tree();
+
+    // Ordinary from_external should reject at wall clock (since current unix time is > 200)
+    let res = PublicGroup::from_external(
+        public_provider.crypto(),
+        public_provider.storage(),
+        ratchet_tree.clone().into(),
+        verifiable_group_info.clone(),
+        ProposalStore::new(),
+    );
+    assert!(res.is_err(), "from_external should reject at wall clock");
+
+    // from_external_at with UnixSeconds::new(150) should pass
+    let res = PublicGroup::from_external_at(
+        public_provider.crypto(),
+        public_provider.storage(),
+        ratchet_tree.clone().into(),
+        verifiable_group_info.clone(),
+        ProposalStore::new(),
+        UnixSeconds::new(150),
+    );
+    assert!(res.is_ok(), "from_external_at with 150 should pass");
+
+    // 99, 100, 200, 201 should reject
+    for t in [99, 100, 200, 201] {
+        let res = PublicGroup::from_external_at(
+            public_provider.crypto(),
+            public_provider.storage(),
+            ratchet_tree.clone().into(),
+            verifiable_group_info.clone(),
+            ProposalStore::new(),
+            UnixSeconds::new(t),
+        );
+        assert!(res.is_err(), "from_external_at with {t} should reject");
+    }
+}
+
+#[derive(Default)]
+struct FailingPublicStorage;
+
+#[derive(thiserror::Error, Debug, Copy, Clone, PartialEq, Eq)]
+#[error("Injected storage write error")]
+struct FailingStorageError;
+
+impl
+    openmls_traits::public_storage::PublicStorageProvider<
+        { openmls_traits::storage::CURRENT_VERSION },
+    > for FailingPublicStorage
+{
+    type PublicError = FailingStorageError;
+
+    fn write_tree<
+        GroupId: openmls_traits::storage::traits::GroupId<{ openmls_traits::storage::CURRENT_VERSION }>,
+        TreeSync: openmls_traits::storage::traits::TreeSync<{ openmls_traits::storage::CURRENT_VERSION }>,
+    >(
+        &self,
+        _group_id: &GroupId,
+        _tree: &TreeSync,
+    ) -> Result<(), Self::PublicError> {
+        Err(FailingStorageError)
+    }
+
+    fn write_interim_transcript_hash<
+        GroupId: openmls_traits::storage::traits::GroupId<{ openmls_traits::storage::CURRENT_VERSION }>,
+        InterimTranscriptHash: openmls_traits::storage::traits::InterimTranscriptHash<
+            { openmls_traits::storage::CURRENT_VERSION },
+        >,
+    >(
+        &self,
+        _group_id: &GroupId,
+        _interim_transcript_hash: &InterimTranscriptHash,
+    ) -> Result<(), Self::PublicError> {
+        Err(FailingStorageError)
+    }
+
+    fn write_context<
+        GroupId: openmls_traits::storage::traits::GroupId<{ openmls_traits::storage::CURRENT_VERSION }>,
+        GroupContext: openmls_traits::storage::traits::GroupContext<{ openmls_traits::storage::CURRENT_VERSION }>,
+    >(
+        &self,
+        _group_id: &GroupId,
+        _group_context: &GroupContext,
+    ) -> Result<(), Self::PublicError> {
+        Err(FailingStorageError)
+    }
+
+    fn write_confirmation_tag<
+        GroupId: openmls_traits::storage::traits::GroupId<{ openmls_traits::storage::CURRENT_VERSION }>,
+        ConfirmationTag: openmls_traits::storage::traits::ConfirmationTag<
+            { openmls_traits::storage::CURRENT_VERSION },
+        >,
+    >(
+        &self,
+        _group_id: &GroupId,
+        _confirmation_tag: &ConfirmationTag,
+    ) -> Result<(), Self::PublicError> {
+        Err(FailingStorageError)
+    }
+
+    fn queue_proposal<
+        GroupId: openmls_traits::storage::traits::GroupId<{ openmls_traits::storage::CURRENT_VERSION }>,
+        ProposalRef: openmls_traits::storage::traits::ProposalRef<{ openmls_traits::storage::CURRENT_VERSION }>,
+        QueuedProposal: openmls_traits::storage::traits::QueuedProposal<
+            { openmls_traits::storage::CURRENT_VERSION },
+        >,
+    >(
+        &self,
+        _group_id: &GroupId,
+        _proposal_ref: &ProposalRef,
+        _proposal: &QueuedProposal,
+    ) -> Result<(), Self::PublicError> {
+        Err(FailingStorageError)
+    }
+
+    fn queued_proposals<
+        GroupId: openmls_traits::storage::traits::GroupId<{ openmls_traits::storage::CURRENT_VERSION }>,
+        ProposalRef: openmls_traits::storage::traits::ProposalRef<{ openmls_traits::storage::CURRENT_VERSION }>,
+        QueuedProposal: openmls_traits::storage::traits::QueuedProposal<
+            { openmls_traits::storage::CURRENT_VERSION },
+        >,
+    >(
+        &self,
+        _group_id: &GroupId,
+    ) -> Result<Vec<(ProposalRef, QueuedProposal)>, Self::PublicError> {
+        Ok(vec![])
+    }
+
+    fn tree<
+        GroupId: openmls_traits::storage::traits::GroupId<{ openmls_traits::storage::CURRENT_VERSION }>,
+        TreeSync: openmls_traits::storage::traits::TreeSync<{ openmls_traits::storage::CURRENT_VERSION }>,
+    >(
+        &self,
+        _group_id: &GroupId,
+    ) -> Result<Option<TreeSync>, Self::PublicError> {
+        Ok(None)
+    }
+
+    fn group_context<
+        GroupId: openmls_traits::storage::traits::GroupId<{ openmls_traits::storage::CURRENT_VERSION }>,
+        GroupContext: openmls_traits::storage::traits::GroupContext<{ openmls_traits::storage::CURRENT_VERSION }>,
+    >(
+        &self,
+        _group_id: &GroupId,
+    ) -> Result<Option<GroupContext>, Self::PublicError> {
+        Ok(None)
+    }
+
+    fn interim_transcript_hash<
+        GroupId: openmls_traits::storage::traits::GroupId<{ openmls_traits::storage::CURRENT_VERSION }>,
+        InterimTranscriptHash: openmls_traits::storage::traits::InterimTranscriptHash<
+            { openmls_traits::storage::CURRENT_VERSION },
+        >,
+    >(
+        &self,
+        _group_id: &GroupId,
+    ) -> Result<Option<InterimTranscriptHash>, Self::PublicError> {
+        Ok(None)
+    }
+
+    fn confirmation_tag<
+        GroupId: openmls_traits::storage::traits::GroupId<{ openmls_traits::storage::CURRENT_VERSION }>,
+        ConfirmationTag: openmls_traits::storage::traits::ConfirmationTag<
+            { openmls_traits::storage::CURRENT_VERSION },
+        >,
+    >(
+        &self,
+        _group_id: &GroupId,
+    ) -> Result<Option<ConfirmationTag>, Self::PublicError> {
+        Ok(None)
+    }
+
+    fn delete_tree<
+        GroupId: openmls_traits::storage::traits::GroupId<{ openmls_traits::storage::CURRENT_VERSION }>,
+    >(
+        &self,
+        _group_id: &GroupId,
+    ) -> Result<(), Self::PublicError> {
+        Ok(())
+    }
+
+    fn delete_confirmation_tag<
+        GroupId: openmls_traits::storage::traits::GroupId<{ openmls_traits::storage::CURRENT_VERSION }>,
+    >(
+        &self,
+        _group_id: &GroupId,
+    ) -> Result<(), Self::PublicError> {
+        Ok(())
+    }
+
+    fn delete_context<
+        GroupId: openmls_traits::storage::traits::GroupId<{ openmls_traits::storage::CURRENT_VERSION }>,
+    >(
+        &self,
+        _group_id: &GroupId,
+    ) -> Result<(), Self::PublicError> {
+        Ok(())
+    }
+
+    fn delete_interim_transcript_hash<
+        GroupId: openmls_traits::storage::traits::GroupId<{ openmls_traits::storage::CURRENT_VERSION }>,
+    >(
+        &self,
+        _group_id: &GroupId,
+    ) -> Result<(), Self::PublicError> {
+        Ok(())
+    }
+
+    fn remove_proposal<
+        GroupId: openmls_traits::storage::traits::GroupId<{ openmls_traits::storage::CURRENT_VERSION }>,
+        ProposalRef: openmls_traits::storage::traits::ProposalRef<{ openmls_traits::storage::CURRENT_VERSION }>,
+    >(
+        &self,
+        _group_id: &GroupId,
+        _proposal_ref: &ProposalRef,
+    ) -> Result<(), Self::PublicError> {
+        Ok(())
+    }
+
+    fn clear_proposal_queue<
+        GroupId: openmls_traits::storage::traits::GroupId<{ openmls_traits::storage::CURRENT_VERSION }>,
+        ProposalRef: openmls_traits::storage::traits::ProposalRef<{ openmls_traits::storage::CURRENT_VERSION }>,
+    >(
+        &self,
+        _group_id: &GroupId,
+    ) -> Result<(), Self::PublicError> {
+        Ok(())
+    }
+}
+
+#[openmls_test::openmls_test]
+fn differential_validation_negatives_between_current_and_at() {
+    use crate::extensions::{Extension, ExtensionType, Extensions, RequiredCapabilitiesExtension};
+    use crate::group::public_group::errors::CreationFromExternalError;
+    use crate::key_packages::{Lifetime, UnixSeconds};
+    use crate::test_utils::restricted_provider::RestrictedProvider;
+    use crate::treesync::errors::LeafNodeValidationError;
+    use crate::treesync::RatchetTreeIn;
+    use std::time::{SystemTime, UNIX_EPOCH};
+    use tls_codec::{Deserialize as _, Serialize as _};
+
+    let alice_provider = &Provider::default();
+    let public_provider = &Provider::default();
+    let _lock = crate::skip_validation::checks::leaf_node_lifetime::handle();
+    let now_secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let valid_instant = UnixSeconds::new(now_secs);
+
+    let group_id = GroupId::from_slice(b"Differential Group");
+    let (alice_credential_with_key, _alice_kpb, alice_signer, _alice_pk) =
+        setup_client("Alice", ciphersuite, alice_provider);
+
+    let mls_group_create_config = MlsGroupCreateConfig::builder()
+        .wire_format_policy(PURE_PLAINTEXT_WIRE_FORMAT_POLICY)
+        .ciphersuite(ciphersuite)
+        .lifetime(Lifetime::init(now_secs - 1000, now_secs + 1000))
+        .build();
+
+    let alice_group = MlsGroup::new_with_group_id(
+        alice_provider,
+        &alice_signer,
+        &mls_group_create_config,
+        group_id,
+        alice_credential_with_key.clone(),
+    )
+    .expect("An unexpected error occurred.");
+
+    let verifiable_group_info = alice_group
+        .export_group_info(alice_provider.crypto(), &alice_signer, false)
+        .unwrap()
+        .into_verifiable_group_info()
+        .unwrap();
+    let ratchet_tree = alice_group.export_ratchet_tree();
+
+    // Baseline: both Current and At(valid_instant) succeed on valid inputs
+    let res_cur = PublicGroup::from_external(
+        public_provider.crypto(),
+        public_provider.storage(),
+        ratchet_tree.clone().into(),
+        verifiable_group_info.clone(),
+        ProposalStore::new(),
+    );
+    assert!(res_cur.is_ok(), "baseline from_external should succeed");
+
+    let res_at = PublicGroup::from_external_at(
+        public_provider.crypto(),
+        public_provider.storage(),
+        ratchet_tree.clone().into(),
+        verifiable_group_info.clone(),
+        ProposalStore::new(),
+        valid_instant,
+    );
+    assert!(res_at.is_ok(), "baseline from_external_at should succeed");
+
+    // 1. Mutated GroupInfo signature
+    let mut bad_vgi = verifiable_group_info.clone();
+    bad_vgi.break_signature();
+    let err_cur = PublicGroup::from_external(
+        public_provider.crypto(),
+        public_provider.storage(),
+        ratchet_tree.clone().into(),
+        bad_vgi.clone(),
+        ProposalStore::new(),
+    )
+    .unwrap_err();
+    let err_at = PublicGroup::from_external_at(
+        public_provider.crypto(),
+        public_provider.storage(),
+        ratchet_tree.clone().into(),
+        bad_vgi,
+        ProposalStore::new(),
+        valid_instant,
+    )
+    .unwrap_err();
+    assert_eq!(
+        err_cur,
+        CreationFromExternalError::InvalidGroupInfoSignature
+    );
+    assert_eq!(err_at, CreationFromExternalError::InvalidGroupInfoSignature);
+
+    // 2. Malformed tree
+    let bad_tree = RatchetTreeIn::from_nodes(vec![]);
+    let err_cur = PublicGroup::from_external(
+        public_provider.crypto(),
+        public_provider.storage(),
+        bad_tree.clone(),
+        verifiable_group_info.clone(),
+        ProposalStore::new(),
+    )
+    .unwrap_err();
+    let err_at = PublicGroup::from_external_at(
+        public_provider.crypto(),
+        public_provider.storage(),
+        bad_tree,
+        verifiable_group_info.clone(),
+        ProposalStore::new(),
+        valid_instant,
+    )
+    .unwrap_err();
+    assert!(matches!(
+        err_cur,
+        CreationFromExternalError::TreeSyncError(_)
+    ));
+    assert_eq!(err_cur, err_at);
+
+    // 3. Invalid credential / tampered leaf node signature
+    let mut tree_bytes = ratchet_tree.tls_serialize_detached().unwrap();
+    if let Some(last) = tree_bytes.last_mut() {
+        *last ^= 0xFF;
+    }
+    if let Ok(tampered_tree) = RatchetTreeIn::tls_deserialize(&mut tree_bytes.as_slice()) {
+        let err_cur = PublicGroup::from_external(
+            public_provider.crypto(),
+            public_provider.storage(),
+            tampered_tree.clone(),
+            verifiable_group_info.clone(),
+            ProposalStore::new(),
+        )
+        .unwrap_err();
+        let err_at = PublicGroup::from_external_at(
+            public_provider.crypto(),
+            public_provider.storage(),
+            tampered_tree,
+            verifiable_group_info.clone(),
+            ProposalStore::new(),
+            valid_instant,
+        )
+        .unwrap_err();
+        assert_eq!(err_cur, err_at);
+    }
+
+    // 4. Unsupported extension in group context
+    let mut req_ext = Extensions::default();
+    req_ext
+        .add(Extension::RequiredCapabilities(
+            RequiredCapabilitiesExtension::new(&[ExtensionType::from(0xFFFE)], &[], &[]),
+        ))
+        .unwrap();
+    let ext_create_config = MlsGroupCreateConfig::builder()
+        .wire_format_policy(PURE_PLAINTEXT_WIRE_FORMAT_POLICY)
+        .ciphersuite(ciphersuite)
+        .lifetime(Lifetime::init(now_secs - 1000, now_secs + 1000))
+        .with_group_context_extensions(req_ext)
+        .build();
+    let ext_group = MlsGroup::new_with_group_id(
+        alice_provider,
+        &alice_signer,
+        &ext_create_config,
+        GroupId::from_slice(b"Ext Group"),
+        alice_credential_with_key.clone(),
+    )
+    .expect("group creation with required extensions");
+    let ext_vgi = ext_group
+        .export_group_info(alice_provider.crypto(), &alice_signer, false)
+        .unwrap()
+        .into_verifiable_group_info()
+        .unwrap();
+    let ext_tree = ext_group.export_ratchet_tree();
+    let err_cur = PublicGroup::from_external(
+        public_provider.crypto(),
+        public_provider.storage(),
+        ext_tree.clone().into(),
+        ext_vgi.clone(),
+        ProposalStore::new(),
+    )
+    .unwrap_err();
+    let err_at = PublicGroup::from_external_at(
+        public_provider.crypto(),
+        public_provider.storage(),
+        ext_tree.into(),
+        ext_vgi,
+        ProposalStore::new(),
+        valid_instant,
+    )
+    .unwrap_err();
+    assert_eq!(
+        err_cur,
+        CreationFromExternalError::LeafNodeValidation(
+            LeafNodeValidationError::UnsupportedExtensions
+        )
+    );
+    assert_eq!(
+        err_at,
+        CreationFromExternalError::LeafNodeValidation(
+            LeafNodeValidationError::UnsupportedExtensions
+        )
+    );
+
+    // 5. Unsupported ciphersuite
+    let restricted_crypto = RestrictedProvider::new(vec![]);
+    let err_cur = PublicGroup::from_external(
+        restricted_crypto.crypto(),
+        public_provider.storage(),
+        ratchet_tree.clone().into(),
+        verifiable_group_info.clone(),
+        ProposalStore::new(),
+    )
+    .unwrap_err();
+    let err_at = PublicGroup::from_external_at(
+        restricted_crypto.crypto(),
+        public_provider.storage(),
+        ratchet_tree.clone().into(),
+        verifiable_group_info.clone(),
+        ProposalStore::new(),
+        valid_instant,
+    )
+    .unwrap_err();
+    assert_eq!(
+        err_cur,
+        CreationFromExternalError::UnsupportedCiphersuite(ciphersuite)
+    );
+    assert_eq!(
+        err_at,
+        CreationFromExternalError::UnsupportedCiphersuite(ciphersuite)
+    );
+
+    // 6. Injected storage-write failure
+    let failing_storage = FailingPublicStorage;
+    let err_cur = PublicGroup::from_external(
+        public_provider.crypto(),
+        &failing_storage,
+        ratchet_tree.clone().into(),
+        verifiable_group_info.clone(),
+        ProposalStore::new(),
+    )
+    .unwrap_err();
+    let err_at = PublicGroup::from_external_at(
+        public_provider.crypto(),
+        &failing_storage,
+        ratchet_tree.into(),
+        verifiable_group_info,
+        ProposalStore::new(),
+        valid_instant,
+    )
+    .unwrap_err();
+    assert_eq!(
+        err_cur,
+        CreationFromExternalError::WriteToStorageError(FailingStorageError)
+    );
+    assert_eq!(
+        err_at,
+        CreationFromExternalError::WriteToStorageError(FailingStorageError)
+    );
+}
+
+#[test]
+fn leaf_node_lifetime_validation_skip_only_from_upstream_policy_skip() {
+    use crate::group::mls_group::creation::{LeafNodeLifetimePolicy, LeafNodeLifetimeValidation};
+    use crate::key_packages::UnixSeconds;
+
+    // Upstream LeafNodeLifetimePolicy::Verify maps to Current
+    assert_eq!(
+        LeafNodeLifetimeValidation::from(LeafNodeLifetimePolicy::Verify),
+        LeafNodeLifetimeValidation::Current
+    );
+    // Upstream LeafNodeLifetimePolicy::Skip maps to Skip
+    assert_eq!(
+        LeafNodeLifetimeValidation::from(LeafNodeLifetimePolicy::Skip),
+        LeafNodeLifetimeValidation::Skip
+    );
+    // At is constructed explicitly
+    let at = LeafNodeLifetimeValidation::At(UnixSeconds::new(12345));
+    assert_eq!(at, LeafNodeLifetimeValidation::At(UnixSeconds::new(12345)));
+    assert_ne!(at, LeafNodeLifetimeValidation::Skip);
+    assert_ne!(at, LeafNodeLifetimeValidation::Current);
+}
