@@ -880,18 +880,12 @@ impl PublicGroup {
         // Some KATs use key packages that are expired by now. In order to run these tests, we
         // provide a way to turn off this check.
         if !crate::skip_validation::is_disabled::leaf_node_lifetime() {
-            match validate_lifetimes {
-                LeafNodeLifetimeValidation::Current => {
-                    if let Some(lifetime) = leaf_node.life_time() {
-                        lifetime.validate()?;
-                    }
+            if let Some(lifetime) = leaf_node.life_time() {
+                match validate_lifetimes {
+                    LeafNodeLifetimeValidation::Current => lifetime.validate()?,
+                    LeafNodeLifetimeValidation::At(instant) => lifetime.validate_at(instant)?,
+                    LeafNodeLifetimeValidation::Skip => {}
                 }
-                LeafNodeLifetimeValidation::At(instant) => {
-                    if let Some(lifetime) = leaf_node.life_time() {
-                        lifetime.validate_at(instant)?;
-                    }
-                }
-                LeafNodeLifetimeValidation::Skip => {}
             }
         }
 
