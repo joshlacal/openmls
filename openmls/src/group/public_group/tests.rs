@@ -878,12 +878,13 @@ impl
 
 #[openmls_test::openmls_test]
 fn differential_validation_negatives_between_current_and_at() {
+    use crate::credentials::CredentialType;
     use crate::extensions::{Extension, ExtensionType, Extensions, RequiredCapabilitiesExtension};
     use crate::group::public_group::errors::CreationFromExternalError;
     use crate::key_packages::{Lifetime, UnixSeconds};
     use crate::test_utils::restricted_provider::RestrictedProvider;
-    use crate::treesync::errors::LeafNodeValidationError;
-    use crate::treesync::RatchetTreeIn;
+    use crate::treesync::errors::{LeafNodeValidationError, TreeSyncFromNodesError};
+    use crate::treesync::{node::leaf_node::Capabilities, RatchetTreeError, RatchetTreeIn};
     use std::time::{SystemTime, UNIX_EPOCH};
     use tls_codec::{Deserialize as _, Serialize as _};
 
@@ -993,33 +994,96 @@ fn differential_validation_negatives_between_current_and_at() {
     ));
     assert_eq!(err_cur, err_at);
 
-    // 3. Invalid credential / tampered leaf node signature
-    let mut tree_bytes = ratchet_tree.tls_serialize_detached().unwrap();
-    if let Some(last) = tree_bytes.last_mut() {
-        *last ^= 0xFF;
-    }
-    if let Ok(tampered_tree) = RatchetTreeIn::tls_deserialize(&mut tree_bytes.as_slice()) {
-        let err_cur = PublicGroup::from_external(
-            public_provider.crypto(),
-            public_provider.storage(),
-            tampered_tree.clone(),
-            verifiable_group_info.clone(),
-            ProposalStore::new(),
+    // 3. Invalid credential (unsupported credential type in leaf node capabilities)
+    let bad_cred_capabilities = Capabilities::new(
+        None,
+        Some(&[ciphersuite]),
+        None,
+        None,
+        Some(&[CredentialType::Other(0xFFFF)]),
+    );
+    let bad_cred_config = MlsGroupCreateConfig::builder()
+        .wire_format_policy(PURE_PLAINTEXT_WIRE_FORMAT_POLICY)
+        .ciphersuite(ciphersuite)
+        .lifetime(Lifetime::init(now_secs - 1000, now_secs + 1000))
+        .capabilities(bad_cred_capabilities)
+        .build();
+    let bad_cred_group = MlsGroup::new_with_group_id(
+        alice_provider,
+        &alice_signer,
+        &bad_cred_config,
+        GroupId::from_slice(b"Bad Cred Group"),
+        alice_credential_with_key.clone(),
+    )
+    .expect("group creation should succeed");
+    let bad_cred_vgi = bad_cred_group
+        .export_group_info(alice_provider.crypto(), &alice_signer, false)
+        .unwrap()
+        .into_verifiable_group_info()
+        .unwrap();
+    let bad_cred_tree = bad_cred_group.export_ratchet_tree();
+    let err_cur = PublicGroup::from_external(
+        public_provider.crypto(),
+        public_provider.storage(),
+        bad_cred_tree.clone().into(),
+        bad_cred_vgi.clone(),
+        ProposalStore::new(),
+    )
+    .unwrap_err();
+    let err_at = PublicGroup::from_external_at(
+        public_provider.crypto(),
+        public_provider.storage(),
+        bad_cred_tree.into(),
+        bad_cred_vgi,
+        ProposalStore::new(),
+        valid_instant,
+    )
+    .unwrap_err();
+    assert_eq!(
+        err_cur,
+        CreationFromExternalError::LeafNodeValidation(
+            LeafNodeValidationError::UnsupportedCredentials
         )
-        .unwrap_err();
-        let err_at = PublicGroup::from_external_at(
-            public_provider.crypto(),
-            public_provider.storage(),
-            tampered_tree,
-            verifiable_group_info.clone(),
-            ProposalStore::new(),
-            valid_instant,
+    );
+    assert_eq!(
+        err_at,
+        CreationFromExternalError::LeafNodeValidation(
+            LeafNodeValidationError::UnsupportedCredentials
         )
-        .unwrap_err();
-        assert_eq!(err_cur, err_at);
-    }
+    );
 
-    // 4. Unsupported extension in group context
+    // 4. Tampered leaf node signature
+    let mut tree_bytes = ratchet_tree.tls_serialize_detached().unwrap();
+    let last = tree_bytes.last_mut().expect("tree bytes must not be empty");
+    *last ^= 0xFF;
+    let tampered_tree = RatchetTreeIn::tls_deserialize(&mut tree_bytes.as_slice())
+        .expect("ratchet tree deserialization should succeed");
+    let err_cur = PublicGroup::from_external(
+        public_provider.crypto(),
+        public_provider.storage(),
+        tampered_tree.clone(),
+        verifiable_group_info.clone(),
+        ProposalStore::new(),
+    )
+    .unwrap_err();
+    let err_at = PublicGroup::from_external_at(
+        public_provider.crypto(),
+        public_provider.storage(),
+        tampered_tree,
+        verifiable_group_info.clone(),
+        ProposalStore::new(),
+        valid_instant,
+    )
+    .unwrap_err();
+    assert_eq!(
+        err_cur,
+        CreationFromExternalError::TreeSyncError(TreeSyncFromNodesError::RatchetTreeError(
+            RatchetTreeError::InvalidNodeSignature
+        ))
+    );
+    assert_eq!(err_cur, err_at);
+
+    // 5. Unsupported extension in group context
     let mut req_ext = Extensions::default();
     req_ext
         .add(Extension::RequiredCapabilities(
@@ -1076,7 +1140,7 @@ fn differential_validation_negatives_between_current_and_at() {
         )
     );
 
-    // 5. Unsupported ciphersuite
+    // 6. Unsupported ciphersuite
     let restricted_crypto = RestrictedProvider::new(vec![]);
     let err_cur = PublicGroup::from_external(
         restricted_crypto.crypto(),
@@ -1104,7 +1168,7 @@ fn differential_validation_negatives_between_current_and_at() {
         CreationFromExternalError::UnsupportedCiphersuite(ciphersuite)
     );
 
-    // 6. Injected storage-write failure
+    // 7. Injected storage-write failure
     let failing_storage = FailingPublicStorage;
     let err_cur = PublicGroup::from_external(
         public_provider.crypto(),
