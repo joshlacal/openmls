@@ -1259,18 +1259,19 @@ impl MlsGroup {
     }
 }
 
-/// Verify or skip the validation of leaf node lifetimes in the ratchet tree
-/// when joining a group.
+/// How the lifetime of a leaf node is checked.
 #[derive(Default, Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum LeafNodeLifetimePolicy {
-    /// Verify the lifetime of leaf nodes in the ratchet tree.
-    ///
-    /// **NOTE:** Only leaf nodes that have never been updated have a lifetime.
+    /// Check the lifetime against the current time.
     #[default]
     Verify,
 
-    /// Skip the verification of the lifeimte in leaf nodes in the ratchet tree.
+    /// Do not check the lifetime.
     Skip,
+
+    /// Check the lifetime against the given time, in seconds since the Unix
+    /// epoch, instead of the current time.
+    VerifyAt(u64),
 }
 
 /// Builder for joining a group.
@@ -1314,6 +1315,14 @@ impl<'a, Provider: OpenMlsProvider> JoinBuilder<'a, Provider> {
     /// By default they are validated.
     pub fn skip_lifetime_validation(mut self) -> Self {
         self.validate_lifetimes = LeafNodeLifetimePolicy::Skip;
+        self
+    }
+
+    /// Sets how the lifetimes of leaf nodes in the ratchet tree are checked.
+    /// [`Self::skip_lifetime_validation`] is the same as passing
+    /// [`LeafNodeLifetimePolicy::Skip`].
+    pub fn leaf_node_lifetime_policy(mut self, lifetime_policy: LeafNodeLifetimePolicy) -> Self {
+        self.validate_lifetimes = lifetime_policy;
         self
     }
 

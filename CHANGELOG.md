@@ -5,6 +5,20 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## Unreleased
+
+### Added
+
+- [#2257](https://github.com/openmls/openmls/pull/2257): Added `LeafNodeLifetimePolicy::VerifyAt`, which checks the lifetime of a leaf node against a time the caller passes, in seconds since the Unix epoch, instead of the system clock.
+- [#2257](https://github.com/openmls/openmls/pull/2257): Added `MlsGroup::process_message_with_lifetime_policy` and `PublicGroup::process_message_with_lifetime_policy`. They work like `process_message`, but check the lifetimes of the key packages in Add proposals under the given `LeafNodeLifetimePolicy`. The policy is not stored on the group. If the call returns an `UnresolvedAppDataCommit`, the policy also applies when it is staged.
+- [#2257](https://github.com/openmls/openmls/pull/2257): Added `PublicGroup::from_external_with_lifetime_policy`, which checks the lifetimes of the leaf nodes in the ratchet tree under the given `LeafNodeLifetimePolicy`.
+- [#2257](https://github.com/openmls/openmls/pull/2257): Added `leaf_node_lifetime_policy` to `CommitBuilder`, `BranchGroupBuilder`, `JoinBuilder` and `ExternalCommitBuilder`. On the first two it applies to the key packages of the new members when the commit is built, on the other two to the leaf nodes in the ratchet tree.
+- [#2257](https://github.com/openmls/openmls/pull/2257): Added `KeyPackageIn::validate_with_lifetime_policy` and `PublicGroup::validate_key_package_for_add_with_lifetime_policy`. They work like `validate` and `validate_key_package_for_add`, but check the lifetime under the given `LeafNodeLifetimePolicy`.
+
+### Changed
+
+- [#2257](https://github.com/openmls/openmls/pull/2257): `LeafNodeLifetimePolicy` has the new variant `VerifyAt`, so an exhaustive `match` on it needs another arm.
+
 ## 0.9.2 (2026-10-22)
 
 ### Fixed

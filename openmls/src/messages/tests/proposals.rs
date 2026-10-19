@@ -42,3 +42,4 @@ fn proposals_codec() {
 
     assert_eq!(proposal_or_ref, decoded.into());
 }
+
