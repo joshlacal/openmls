@@ -60,13 +60,12 @@ jobs:
             runs: 50000
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@master
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
         with:
           toolchain: nightly
-      - uses: Swatinem/rust-cache@v2
-      - uses: actions-rs/install@v0.1
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - uses: taiki-e/install-action@1e29709c0ec63babbe8f266397a465f29a825f91 # v2.87.31
         with:
-          crate: cargo-fuzz
-          version: latest
+          tool: cargo-fuzz@0.13.2
       - run: cargo fuzz run ${{ matrix.tests }} -- -runs=${{ matrix.runs }}
