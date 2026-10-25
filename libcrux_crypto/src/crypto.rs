@@ -121,7 +121,8 @@ impl OpenMlsCrypto for CryptoProvider {
         message: &[u8],
     ) -> Result<SecretVLBytes, CryptoError> {
         let alg = hash_alg(hash_type);
-        let out = libcrux_hmac::hmac(alg, key, message, None);
+        let mut out = vec![0u8; libcrux_hmac::tag_size(alg)];
+        libcrux_hmac::hmac(alg, key, message, &mut out);
         Ok(out.into())
     }
 
@@ -402,6 +403,10 @@ impl OpenMlsCrypto for CryptoProvider {
         config: HpkeConfig,
         ikm: &[u8],
     ) -> Result<HpkeKeyPair, CryptoError> {
+        #[cfg(feature = "legacy-pq-key-derivation")]
+        if is_legacy_xwing_config(&config) {
+            return derive_legacy_xwing_keypair(ikm);
+        }
         let config = hpke_config(config);
 
         let key_pair: hpke_rs::HpkeKeyPair = config.derive_key_pair(ikm).map_err(|e| match e {
@@ -513,6 +518,40 @@ fn hpke_kdf(kdf: HpkeKdfType) -> hpke_rs_crypto::types::KdfAlgorithm {
         HpkeKdfType::HkdfSha384 => hpke_rs_crypto::types::KdfAlgorithm::HkdfSha384,
         HpkeKdfType::HkdfSha512 => hpke_rs_crypto::types::KdfAlgorithm::HkdfSha512,
     }
+}
+
+/// The HPKE configuration of `MLS_256_XWING_CHACHA20POLY1305_SHA256_Ed25519`
+/// (0x004D). No draft-ietf-mls-pq-ciphersuites suite uses this combination
+/// (TBD1 uses AES-128-GCM, TBD9 HKDF-SHA384), so matching on it only affects
+/// the legacy suite.
+#[cfg(feature = "legacy-pq-key-derivation")]
+fn is_legacy_xwing_config(config: &HpkeConfig) -> bool {
+    matches!(
+        config,
+        HpkeConfig(
+            HpkeKemType::XWingKemDraft6,
+            HpkeKdfType::HkdfSha256,
+            HpkeAeadType::ChaCha20Poly1305,
+        )
+    )
+}
+
+/// openmls_libcrux_crypto 0.4.0 derived X-Wing key pairs from the unlabeled `SHAKE256(ikm, 32)`
+/// rather than draft-ietf-hpke-pq's `SHAKE256.LabeledDerive`. The private key
+/// is the 32-byte X-Wing seed in both cases, so only the derivation differs.
+#[cfg(feature = "legacy-pq-key-derivation")]
+fn derive_legacy_xwing_keypair(ikm: &[u8]) -> Result<HpkeKeyPair, CryptoError> {
+    use hpke_rs_crypto::HpkeCrypto;
+
+    let seed = libcrux_sha3::shake256::<32>(ikm);
+    let (public, private) =
+        <HpkeLibcrux>::kem_key_gen_derand(hpke_rs_crypto::types::KemAlgorithm::XWingDraft06, &seed)
+            .map_err(|_| CryptoError::CryptoLibraryError)?;
+
+    Ok(HpkeKeyPair {
+        private: private.into(),
+        public,
+    })
 }
 
 fn hpke_kem(kem: HpkeKemType) -> hpke_rs_crypto::types::KemAlgorithm {

@@ -6,7 +6,7 @@ use web_time::{SystemTime, UNIX_EPOCH};
 use serde::{Deserialize, Serialize};
 use tls_codec::{TlsDeserialize, TlsDeserializeBytes, TlsSerialize, TlsSize};
 
-use crate::treesync::errors::LifetimeError;
+use crate::{group::LeafNodeLifetimePolicy, treesync::errors::LifetimeError};
 
 /// This value is used as the default lifetime if no default  lifetime is configured.
 /// The value is in seconds and amounts to 3 * 28 Days, i.e. about 3 months.
@@ -88,6 +88,28 @@ impl Lifetime {
         self.validate_with_time(SystemTime::now())
     }
 
+    /// Returns a [`LifetimeError`] if the lifetime is not valid under
+    /// `policy`.
+    pub(crate) fn validate_with_policy(
+        &self,
+        policy: LeafNodeLifetimePolicy,
+    ) -> Result<(), LifetimeError> {
+        match policy {
+            LeafNodeLifetimePolicy::Verify => self.validate(),
+            LeafNodeLifetimePolicy::Skip => Ok(()),
+            LeafNodeLifetimePolicy::VerifyAt(unix_seconds) => {
+                if self.not_before == unix_seconds {
+                    Err(LifetimeError::NotValidYet {
+                        not_before: self.not_before,
+                        now: unix_seconds,
+                    })
+                } else {
+                    self.validate_at(unix_seconds)
+                }
+            }
+        }
+    }
+
     /// Returns a [`LifetimeError`] if the lifetime is not valid at the given
     /// time.
     pub fn validate_with_time(&self, now: SystemTime) -> Result<(), LifetimeError> {
@@ -95,15 +117,21 @@ impl Lifetime {
             .duration_since(UNIX_EPOCH)
             .map_err(|_| LifetimeError::SystemTimeBeforeUnixEpoch)?
             .as_secs();
-        if self.not_after <= duration_since_unix_epoch {
+        self.validate_at(duration_since_unix_epoch)
+    }
+
+    /// Returns a [`LifetimeError`] if the lifetime is not valid at `now`, in
+    /// seconds since the Unix epoch.
+    fn validate_at(&self, now: u64) -> Result<(), LifetimeError> {
+        if self.not_after <= now {
             Err(LifetimeError::Expired {
                 not_after: self.not_after,
-                now: duration_since_unix_epoch,
+                now,
             })
-        } else if self.not_before > duration_since_unix_epoch {
+        } else if self.not_before > now {
             Err(LifetimeError::NotValidYet {
                 not_before: self.not_before,
-                now: duration_since_unix_epoch,
+                now,
             })
         } else {
             Ok(())
@@ -145,6 +173,29 @@ mod tests {
     use tls_codec::{Deserialize, Serialize};
 
     use super::Lifetime;
+
+    #[test]
+    fn explicit_clock_preserves_strict_bounds_without_changing_current_clock_rules() {
+        use super::LeafNodeLifetimePolicy;
+        let lifetime = Lifetime::init(100, 200);
+        // Current-clock validation keeps the upstream inclusive lower bound.
+        assert!(lifetime
+            .validate_with_time(super::UNIX_EPOCH + Duration::from_secs(100))
+            .is_ok());
+        assert!(lifetime
+            .validate_with_time(super::UNIX_EPOCH + Duration::from_secs(200))
+            .is_err());
+        for at in [0, 99, 100, 200, 201, u64::MAX] {
+            assert!(lifetime
+                .validate_with_policy(LeafNodeLifetimePolicy::VerifyAt(at))
+                .is_err());
+        }
+        for at in [101, 150, 199] {
+            lifetime
+                .validate_with_policy(LeafNodeLifetimePolicy::VerifyAt(at))
+                .unwrap();
+        }
+    }
 
     #[test]
     fn lifetime() {

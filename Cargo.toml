@@ -16,11 +16,11 @@ members = [
     "sqlite_storage",
     "serialization_helpers",
 ]
-exclude = ["compat_tests", "sqlx_storage"]
+exclude = ["compat_tests", "sqlx_storage", "vendor/refinery", "vendor/refinery-core", "vendor/refinery-macros"]
 resolver = "2"
 
 [workspace.package]
-rust-version = "1.91.0"
+rust-version = "1.94.0"
 
 # Central dependency management for some crates
 [workspace.dependencies]

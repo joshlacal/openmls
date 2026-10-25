@@ -145,6 +145,20 @@ impl From<SerdeSenderRatchet> for SenderRatchet {
 }
 
 impl SenderRatchet {
+    /// Snapshot only this sender for rollback if persistence of a consumed
+    /// generation fails. Do not expose general production cloning of secrets.
+    pub(crate) fn snapshot_for_storage_retry(&self) -> Self {
+        match self {
+            Self::EncryptionRatchet(ratchet) => Self::EncryptionRatchet(ratchet.clone()),
+            Self::DecryptionRatchet(ratchet) => Self::DecryptionRatchet(DecryptionRatchet {
+                past_secrets: ratchet.past_secrets.clone(),
+                ratchet_head: ratchet.ratchet_head.clone(),
+            }),
+            #[cfg(feature = "virtual-clients-draft")]
+            Self::DualUse(ratchet) => Self::DualUse(ratchet.snapshot_for_storage_retry()),
+        }
+    }
+
     #[cfg(test)]
     pub(crate) fn generation(&self) -> Generation {
         match self {

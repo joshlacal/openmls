@@ -98,6 +98,35 @@ impl From<RatchetSecret> for DualUseRatchet {
 }
 
 impl DualUseRatchet {
+    pub(crate) fn snapshot_for_storage_retry(&self) -> Self {
+        let past_secrets = self
+            .past_secrets
+            .iter()
+            .map(|(generation, secret)| {
+                let secret = match secret {
+                    DualUsePastSecret::AwaitingConfirmation(material) => {
+                        DualUsePastSecret::AwaitingConfirmation(material.clone())
+                    }
+                    DualUsePastSecret::RetainedForDecryption(
+                        RetainedDecryptionSecret::Available(material),
+                    ) => DualUsePastSecret::RetainedForDecryption(
+                        RetainedDecryptionSecret::Available(material.clone()),
+                    ),
+                    DualUsePastSecret::RetainedForDecryption(
+                        RetainedDecryptionSecret::Consumed,
+                    ) => {
+                        DualUsePastSecret::RetainedForDecryption(RetainedDecryptionSecret::Consumed)
+                    }
+                };
+                (*generation, secret)
+            })
+            .collect();
+        Self {
+            past_secrets,
+            ratchet_head: self.ratchet_head.clone(),
+        }
+    }
+
     pub(crate) fn new(secret: Secret) -> Self {
         Self {
             past_secrets: BTreeMap::new(),

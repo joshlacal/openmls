@@ -587,3 +587,210 @@ fn rejected_messages_leave_message_secrets_unchanged() {
         .ensure_persistence(bob_provider.storage())
         .unwrap();
 }
+
+#[cfg(feature = "sqlite-provider")]
+mod storage_failure {
+    use super::*;
+    use openmls_rust_crypto::RustCrypto;
+    use openmls_sqlite_storage::{Codec, Connection, SqliteStorageProvider};
+    use std::rc::Rc;
+
+    #[derive(Default)]
+    struct JsonCodec;
+    impl Codec for JsonCodec {
+        type Error = serde_json::Error;
+
+        fn to_vec<T: serde::Serialize>(value: &T) -> Result<Vec<u8>, Self::Error> {
+            serde_json::to_vec(value)
+        }
+
+        fn from_slice<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> Result<T, Self::Error> {
+            serde_json::from_slice(bytes)
+        }
+    }
+
+    struct SqliteProvider {
+        directory: Rc<tempfile::TempDir>,
+        connection: Rc<Connection>,
+        storage: SqliteStorageProvider<JsonCodec, Rc<Connection>>,
+        crypto: RustCrypto,
+    }
+
+    impl SqliteProvider {
+        fn open(directory: Rc<tempfile::TempDir>) -> Self {
+            let mut connection = Connection::open(directory.path().join("state.sqlite")).unwrap();
+            SqliteStorageProvider::<JsonCodec, _>::new(&mut connection)
+                .run_migrations()
+                .unwrap();
+            let connection = Rc::new(connection);
+            Self {
+                directory,
+                storage: SqliteStorageProvider::new(connection.clone()),
+                connection,
+                crypto: RustCrypto::default(),
+            }
+        }
+    }
+
+    impl Default for SqliteProvider {
+        fn default() -> Self {
+            Self::open(Rc::new(tempfile::tempdir().unwrap()))
+        }
+    }
+
+    impl OpenMlsProvider for SqliteProvider {
+        type CryptoProvider = RustCrypto;
+        type RandProvider = RustCrypto;
+        type StorageProvider = SqliteStorageProvider<JsonCodec, Rc<Connection>>;
+
+        fn crypto(&self) -> &Self::CryptoProvider {
+            &self.crypto
+        }
+        fn rand(&self) -> &Self::RandProvider {
+            &self.crypto
+        }
+        fn storage(&self) -> &Self::StorageProvider {
+            &self.storage
+        }
+    }
+
+    fn exercise_rejected_write(warmup: bool, consume_later: bool, reopen_before_retry: bool) {
+        let Members {
+            alice_provider,
+            alice_signer,
+            mut alice_group,
+            bob_provider,
+            mut bob_group,
+            ..
+        } = setup::<SqliteProvider>(Ciphersuite::MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519);
+        if warmup {
+            let first = create_application_message(
+                &mut alice_group,
+                &alice_provider,
+                &alice_signer,
+                b"initialize sender ratchet",
+            );
+            assert_application_message(
+                bob_group.process_message(&bob_provider, first).unwrap(),
+                b"initialize sender ratchet",
+            );
+        }
+        let message = create_application_message(
+            &mut alice_group,
+            &alice_provider,
+            &alice_signer,
+            b"retry after storage failure",
+        );
+        if consume_later {
+            let later = create_application_message(
+                &mut alice_group,
+                &alice_provider,
+                &alice_signer,
+                b"later generation",
+            );
+            assert_application_message(
+                bob_group.process_message(&bob_provider, later).unwrap(),
+                b"later generation",
+            );
+        }
+        let in_memory = bob_group.message_secrets_store().clone();
+        let in_storage = stored_message_secrets(&bob_provider, &bob_group);
+        bob_provider
+            .connection
+            .execute_batch(
+                "CREATE TRIGGER reject_ratchet_write BEFORE INSERT ON openmls_group_data \
+             WHEN NEW.data_type = 'message_secrets' \
+             BEGIN SELECT RAISE(ABORT, 'injected message secrets write failure'); END;",
+            )
+            .unwrap();
+        let error = bob_group
+            .process_message(&bob_provider, message.clone())
+            .unwrap_err();
+        match error {
+            ProcessMessageError::StorageError(error) => assert!(error
+                .to_string()
+                .contains("injected message secrets write failure")),
+            error => panic!("expected injected SQLite write failure: {error:?}"),
+        }
+        // Lazy initialization changes cold in-memory representation upstream;
+        // neither initialized nor cold failures may consume this generation.
+        if warmup {
+            assert!(bob_group.message_secrets_store() == &in_memory);
+        }
+        assert!(stored_message_secrets(&bob_provider, &bob_group) == in_storage);
+        bob_provider
+            .connection
+            .execute_batch("DROP TRIGGER reject_ratchet_write")
+            .unwrap();
+        let group_id = bob_group.group_id().clone();
+        let (bob_provider, mut bob_group) = if reopen_before_retry {
+            let directory = bob_provider.directory.clone();
+            drop(bob_group);
+            drop(bob_provider);
+            let provider = SqliteProvider::open(directory);
+            let group = MlsGroup::load(provider.storage(), &group_id)
+                .unwrap()
+                .unwrap();
+            (provider, group)
+        } else {
+            (bob_provider, bob_group)
+        };
+        assert_application_message(
+            bob_group
+                .process_message(&bob_provider, message.clone())
+                .unwrap(),
+            b"retry after storage failure",
+        );
+        // Drop both the group and connection, reopen the file, then prove that
+        // the successfully retried generation was persisted as consumed.
+        let directory = bob_provider.directory.clone();
+        drop(bob_group);
+        drop(bob_provider);
+        let reopened_provider = SqliteProvider::open(directory);
+        let mut reopened_group = MlsGroup::load(reopened_provider.storage(), &group_id)
+            .unwrap()
+            .unwrap();
+        let replay = reopened_group
+            .process_message(&reopened_provider, message)
+            .unwrap_err();
+        assert!(matches!(
+            replay,
+            ProcessMessageError::ValidationError(ValidationError::UnableToDecrypt(
+                MessageDecryptionError::SecretTreeError(
+                    crate::tree::secret_tree::SecretTreeError::SecretReuseError
+                )
+            ))
+        ));
+        let next = create_application_message(
+            &mut alice_group,
+            &alice_provider,
+            &alice_signer,
+            b"next generation after reopen",
+        );
+        assert_application_message(
+            reopened_group
+                .process_message(&reopened_provider, next)
+                .unwrap(),
+            b"next generation after reopen",
+        );
+    }
+    #[test]
+    fn storage_write_failure_keeps_initialized_ratchet_retryable() {
+        exercise_rejected_write(true, false, false);
+    }
+
+    #[test]
+    fn storage_write_failure_restores_out_of_order_secret() {
+        exercise_rejected_write(true, true, false);
+    }
+
+    #[test]
+    fn storage_write_failure_keeps_cold_ratchet_retryable() {
+        exercise_rejected_write(false, false, false);
+    }
+
+    #[test]
+    fn storage_write_failure_retries_after_connection_reopen() {
+        exercise_rejected_write(false, false, true);
+    }
+}

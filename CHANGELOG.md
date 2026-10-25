@@ -5,6 +5,10 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## Catbird dependency refresh (unreleased)
+
+- Backport per-call leaf-node lifetime validation from upstream PR #2257 to the stable 0.9.2 API, preserving strict trusted-time boundaries for historical replay.
+
 ## 0.9.2 (2026-10-22)
 
 ### Fixed

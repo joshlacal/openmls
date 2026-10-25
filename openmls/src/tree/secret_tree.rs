@@ -80,6 +80,13 @@ pub(crate) struct PendingRatchetUpdate {
     peeked: Box<PeekedRatchetGeneration>,
 }
 
+/// The one sender state to restore when a message-secrets write fails.
+pub(crate) struct RatchetStorageRollback {
+    index: LeafNodeIndex,
+    secret_type: SecretType,
+    previous: SenderRatchet,
+}
+
 enum PeekedRatchetGeneration {
     Decryption(PeekedGeneration),
     #[cfg(feature = "virtual-clients-draft")]
@@ -420,6 +427,35 @@ impl SecretTree {
             peeked: Box::new(peeked),
         };
         Ok((ratchet_key_material, update))
+    }
+
+    /// Stage a consumption while retaining the prior sender state until the
+    /// caller has persisted the message secrets. No other sender is copied.
+    pub(crate) fn apply_decryption_update_for_storage(
+        &mut self,
+        update: PendingRatchetUpdate,
+        configuration: &SenderRatchetConfiguration,
+    ) -> Result<RatchetStorageRollback, SecretTreeError> {
+        let rollback = RatchetStorageRollback {
+            index: update.index,
+            secret_type: update.secret_type,
+            previous: self
+                .ratchet_mut(update.index, update.secret_type)?
+                .snapshot_for_storage_retry(),
+        };
+        if let Err(error) = self.apply_decryption_update(update, configuration) {
+            self.restore_after_failed_storage(rollback)?;
+            return Err(error);
+        }
+        Ok(rollback)
+    }
+
+    pub(crate) fn restore_after_failed_storage(
+        &mut self,
+        rollback: RatchetStorageRollback,
+    ) -> Result<(), SecretTreeError> {
+        *self.ratchet_mut(rollback.index, rollback.secret_type)? = rollback.previous;
+        Ok(())
     }
 
     /// Marks the generation in `update` as used in the sender's ratchet.
