@@ -5,6 +5,7 @@ use crate::{
     ciphersuite::{signable::*, *},
     credentials::*,
     extensions::{AnyObject, Extensions},
+    group::LeafNodeLifetimePolicy,
     treesync::node::leaf_node::{LeafNodeIn, VerifiableLeafNode},
     versions::ProtocolVersion,
 };
@@ -138,6 +139,16 @@ impl KeyPackageIn {
         crypto: &impl OpenMlsCrypto,
         protocol_version: ProtocolVersion,
     ) -> Result<KeyPackage, KeyPackageVerifyError> {
+        self.validate_with_lifetime_policy(crypto, protocol_version, LeafNodeLifetimePolicy::Verify)
+    }
+
+    /// Validate a key package using the caller's leaf lifetime policy.
+    pub fn validate_with_lifetime_policy(
+        self,
+        crypto: &impl OpenMlsCrypto,
+        protocol_version: ProtocolVersion,
+        lifetime_policy: LeafNodeLifetimePolicy,
+    ) -> Result<KeyPackage, KeyPackageVerifyError> {
         // We first need to verify the LeafNode inside the KeyPackage
         let leaf_node = self.payload.leaf_node.clone().into_verifiable_leaf_node();
 
@@ -182,19 +193,18 @@ impl KeyPackageIn {
 
         // Extension included in the extensions or leaf_node.extensions fields
         // MUST be included in the leaf_node.capabilities field.
-        for extension in key_package.payload.extensions.iter() {
-            if !key_package
-                .payload
-                .leaf_node
-                .supports_extension(&extension.extension_type())
-            {
-                return Err(KeyPackageVerifyError::UnsupportedExtension);
-            }
+        if !key_package
+            .payload
+            .leaf_node
+            .capabilities()
+            .contains_extensions(&key_package.payload.extensions)
+        {
+            return Err(KeyPackageVerifyError::UnsupportedExtension);
         }
 
         // Ensure validity of the life time extension in the leaf node.
         if let Some(life_time) = key_package.payload.leaf_node.life_time() {
-            life_time.validate()?;
+            life_time.validate_with_policy(lifetime_policy)?;
         } else {
             // This assumes that we only verify key packages with leaf nodes
             // that were created for the key package.

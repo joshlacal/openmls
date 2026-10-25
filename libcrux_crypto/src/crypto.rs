@@ -76,8 +76,10 @@ impl OpenMlsCrypto for CryptoProvider {
         }?;
 
         match ciphersuite.hpke_aead_algorithm() {
-            HpkeAeadType::ChaCha20Poly1305 => Ok(()),
-            _ => Err(CryptoError::UnsupportedCiphersuite),
+            HpkeAeadType::AesGcm128
+            | HpkeAeadType::AesGcm256
+            | HpkeAeadType::ChaCha20Poly1305
+            | HpkeAeadType::Export => Ok(()),
         }?;
 
         Ok(())
@@ -119,7 +121,8 @@ impl OpenMlsCrypto for CryptoProvider {
         message: &[u8],
     ) -> Result<SecretVLBytes, CryptoError> {
         let alg = hash_alg(hash_type);
-        let out = libcrux_hmac::hmac(alg, key, message, None);
+        let mut out = vec![0u8; libcrux_hmac::tag_size(alg)];
+        libcrux_hmac::hmac(alg, key, message, &mut out);
         Ok(out.into())
     }
 
@@ -400,6 +403,10 @@ impl OpenMlsCrypto for CryptoProvider {
         config: HpkeConfig,
         ikm: &[u8],
     ) -> Result<HpkeKeyPair, CryptoError> {
+        #[cfg(feature = "legacy-pq-key-derivation")]
+        if is_legacy_xwing_config(&config) {
+            return derive_legacy_xwing_keypair(ikm);
+        }
         let config = hpke_config(config);
 
         let key_pair: hpke_rs::HpkeKeyPair = config.derive_key_pair(ikm).map_err(|e| match e {
@@ -513,6 +520,40 @@ fn hpke_kdf(kdf: HpkeKdfType) -> hpke_rs_crypto::types::KdfAlgorithm {
     }
 }
 
+/// The HPKE configuration of `MLS_256_XWING_CHACHA20POLY1305_SHA256_Ed25519`
+/// (0x004D). No draft-ietf-mls-pq-ciphersuites suite uses this combination
+/// (TBD1 uses AES-128-GCM, TBD9 HKDF-SHA384), so matching on it only affects
+/// the legacy suite.
+#[cfg(feature = "legacy-pq-key-derivation")]
+fn is_legacy_xwing_config(config: &HpkeConfig) -> bool {
+    matches!(
+        config,
+        HpkeConfig(
+            HpkeKemType::XWingKemDraft6,
+            HpkeKdfType::HkdfSha256,
+            HpkeAeadType::ChaCha20Poly1305,
+        )
+    )
+}
+
+/// openmls_libcrux_crypto 0.4.0 derived X-Wing key pairs from the unlabeled `SHAKE256(ikm, 32)`
+/// rather than draft-ietf-hpke-pq's `SHAKE256.LabeledDerive`. The private key
+/// is the 32-byte X-Wing seed in both cases, so only the derivation differs.
+#[cfg(feature = "legacy-pq-key-derivation")]
+fn derive_legacy_xwing_keypair(ikm: &[u8]) -> Result<HpkeKeyPair, CryptoError> {
+    use hpke_rs_crypto::HpkeCrypto;
+
+    let seed = libcrux_sha3::shake256::<32>(ikm);
+    let (public, private) =
+        <HpkeLibcrux>::kem_key_gen_derand(hpke_rs_crypto::types::KemAlgorithm::XWingDraft06, &seed)
+            .map_err(|_| CryptoError::CryptoLibraryError)?;
+
+    Ok(HpkeKeyPair {
+        private: private.into(),
+        public,
+    })
+}
+
 fn hpke_kem(kem: HpkeKemType) -> hpke_rs_crypto::types::KemAlgorithm {
     match kem {
         HpkeKemType::DhKemP256 => hpke_rs_crypto::types::KemAlgorithm::DhKemP256,
@@ -559,5 +600,79 @@ fn aead_alg(alg_type: AeadType) -> libcrux_aead::Aead {
         AeadType::ChaCha20Poly1305 => libcrux_aead::Aead::ChaCha20Poly1305,
         AeadType::Aes128Gcm => libcrux_aead::Aead::AesGcm128,
         AeadType::Aes256Gcm => libcrux_aead::Aead::AesGcm256,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn advertised_ciphersuites_are_supported() {
+        let provider = CryptoProvider::new().unwrap();
+        for ciphersuite in provider.supported_ciphersuites() {
+            assert!(
+                provider.supports(ciphersuite).is_ok(),
+                "{ciphersuite:?} is advertised by supported_ciphersuites() \
+                 but rejected by supports()"
+            );
+        }
+    }
+
+    #[test]
+    fn advertised_ciphersuites_actually_work() {
+        let provider = CryptoProvider::new().unwrap();
+        for ciphersuite in provider.supported_ciphersuites() {
+            let key = vec![0u8; ciphersuite.aead_key_length()];
+            let nonce = vec![0u8; ciphersuite.aead_nonce_length()];
+            let ciphertext = provider
+                .aead_encrypt(
+                    ciphersuite.aead_algorithm(),
+                    &key,
+                    b"plaintext",
+                    &nonce,
+                    b"aad",
+                )
+                .unwrap_or_else(|e| panic!("{ciphersuite:?}: aead_encrypt failed: {e:?}"));
+            let plaintext = provider
+                .aead_decrypt(
+                    ciphersuite.aead_algorithm(),
+                    &key,
+                    &ciphertext,
+                    &nonce,
+                    b"aad",
+                )
+                .unwrap_or_else(|e| panic!("{ciphersuite:?}: aead_decrypt failed: {e:?}"));
+            assert_eq!(plaintext, b"plaintext", "{ciphersuite:?}: aead round trip");
+
+            let mut ikm = vec![0u8; ciphersuite.hash_length()];
+            provider.fill_random(&mut ikm).unwrap();
+            let key_pair = provider
+                .derive_hpke_keypair(ciphersuite.hpke_config(), &ikm)
+                .unwrap_or_else(|e| panic!("{ciphersuite:?}: derive_hpke_keypair failed: {e:?}"));
+            let sealed = provider
+                .hpke_seal(
+                    ciphersuite.hpke_config(),
+                    &key_pair.public,
+                    b"info",
+                    b"aad",
+                    b"plaintext",
+                )
+                .unwrap_or_else(|e| panic!("{ciphersuite:?}: hpke_seal failed: {e:?}"));
+            let opened = provider
+                .hpke_open(
+                    ciphersuite.hpke_config(),
+                    &sealed,
+                    &key_pair.private,
+                    b"info",
+                    b"aad",
+                )
+                .unwrap_or_else(|e| panic!("{ciphersuite:?}: hpke_open failed: {e:?}"));
+            assert_eq!(
+                opened.as_slice(),
+                b"plaintext",
+                "{ciphersuite:?}: hpke round trip"
+            );
+        }
     }
 }

@@ -30,8 +30,10 @@ use crate::{
     ciphersuite::signable::Verifiable,
     error::LibraryError,
     extensions::ExternalSendersExtension,
-    group::{errors::ValidationError, mls_group::staged_commit::StagedCommit},
-    tree::sender_ratchet::SenderRatchetConfiguration,
+    group::{
+        errors::ValidationError, mls_group::staged_commit::StagedCommit, LeafNodeLifetimePolicy,
+    },
+    tree::{secret_tree::PendingRatchetUpdate, sender_ratchet::SenderRatchetConfiguration},
     versions::ProtocolVersion,
 };
 
@@ -60,7 +62,13 @@ use super::{
 pub(crate) enum InboundDecryptionResult {
     /// A message from another sender or from a sibling emulator client (with
     /// the `virtual-clients-draft` feature), decrypted and ready for parsing.
-    Decrypted(DecryptedMessage),
+    Decrypted {
+        message: DecryptedMessage,
+        /// The sender ratchet change that decrypting a PrivateMessage requires.
+        /// It must only be applied once the message is processed successfully.
+        /// `None` for a PublicMessage.
+        ratchet_update: Option<PendingRatchetUpdate>,
+    },
     /// A private message whose sender data claims this client's own leaf.
     /// Carries the plaintext framing fields needed to build the
     /// [`ProcessedMessage`], since the content itself cannot be decrypted.
@@ -75,7 +83,7 @@ impl InboundDecryptionResult {
     #[cfg(test)]
     pub(crate) fn into_decrypted(self) -> Option<DecryptedMessage> {
         match self {
-            Self::Decrypted(message) => Some(message),
+            Self::Decrypted { message, .. } => Some(message),
             Self::OwnPrivateMessage { .. } => None,
         }
     }
@@ -209,12 +217,15 @@ impl DecryptedMessage {
             }
             Err(e) => return Err(e.into()),
         };
-        Self::from_verifiable_content(
+        let message = Self::from_verifiable_content(
             decrypted.verifiable,
             #[cfg(feature = "virtual-clients-draft")]
             decrypted.emulator_sender_leaf_index,
-        )
-        .map(InboundDecryptionResult::Decrypted)
+        )?;
+        Ok(InboundDecryptionResult::Decrypted {
+            message,
+            ratchet_update: Some(decrypted.ratchet_update),
+        })
     }
 
     // Internal constructor function. Does the following checks:
@@ -371,6 +382,7 @@ impl UnverifiedMessage {
         ciphersuite: Ciphersuite,
         crypto: &impl OpenMlsCrypto,
         protocol_version: ProtocolVersion,
+        lifetime_policy: LeafNodeLifetimePolicy,
     ) -> Result<VerifiedMessage, ValidationError> {
         let content: AuthenticatedContentIn = self
             .verifiable_content
@@ -378,8 +390,13 @@ impl UnverifiedMessage {
             .map_err(|_| ValidationError::InvalidSignature)?;
         // https://validation.openmls.tech/#valn1302
         // https://validation.openmls.tech/#valn1304
-        let content =
-            content.validate(ciphersuite, crypto, self.sender_context, protocol_version)?;
+        let content = content.validate(
+            ciphersuite,
+            crypto,
+            self.sender_context,
+            protocol_version,
+            lifetime_policy,
+        )?;
         Ok(VerifiedMessage {
             content,
             credential: self.credential,

@@ -7,17 +7,17 @@ use errors::CommitToPendingProposalsError;
 use errors::MergePendingCommitError;
 #[cfg(feature = "extensions-draft")]
 use errors::ResolveAppDataCommitError;
+use openmls_traits::crypto::OpenMlsCrypto;
 #[cfg(any(not(feature = "virtual-clients-draft"), feature = "test-utils", test))]
 use openmls_traits::signatures::Signer;
-use openmls_traits::{crypto::OpenMlsCrypto, storage::StorageProvider as _};
 
 #[cfg(any(not(feature = "virtual-clients-draft"), feature = "test-utils", test))]
 use crate::messages::group_info::GroupInfo;
 use crate::{
     framing::mls_content::FramedContentBody,
-    group::{errors::MergeCommitError, StageCommitError, ValidationError},
+    group::{errors::MergeCommitError, LeafNodeLifetimePolicy, StageCommitError, ValidationError},
     storage::OpenMlsProvider,
-    tree::sender_ratchet::SenderRatchetConfiguration,
+    tree::{secret_tree::PendingRatchetUpdate, sender_ratchet::SenderRatchetConfiguration},
 };
 
 // `virtual-clients-draft` implies `extensions-draft`, so this gate covers
@@ -41,7 +41,10 @@ use super::{errors::ProcessMessageError, *};
 pub(crate) enum UnprotectedMessage {
     /// A message from another sender that has been unprotected and is ready
     /// for signature verification and content parsing.
-    Unverified(Box<UnverifiedMessage>),
+    Unverified {
+        message: Box<UnverifiedMessage>,
+        ratchet_update: Option<EpochRatchetUpdate>,
+    },
     /// A PrivateMessage whose sender data claims this client's own leaf. The
     /// content cannot be decrypted; callers should surface
     /// [`ProcessedMessageContent::OwnPrivateMessage`] and skip further
@@ -50,6 +53,14 @@ pub(crate) enum UnprotectedMessage {
         epoch: GroupEpoch,
         authenticated_data: Vec<u8>,
     },
+}
+
+/// A sender ratchet change from decrypting a PrivateMessage and the epoch of
+/// the secret tree it belongs to. It must only be applied once the message is
+/// processed successfully.
+pub(crate) struct EpochRatchetUpdate {
+    epoch: GroupEpoch,
+    update: PendingRatchetUpdate,
 }
 
 #[cfg(feature = "extensions-draft")]
@@ -167,6 +178,9 @@ pub struct UnresolvedAppDataCommit {
     /// by reference already resolved from the proposal store, sorted by
     /// component id.
     proposals: Vec<AppDataUpdateProposal>,
+    /// The lifetime policy the commit was processed with, which also applies
+    /// when it is staged.
+    lifetime_policy: LeafNodeLifetimePolicy,
     #[cfg(feature = "virtual-clients-draft")]
     vc_commit_material: Option<crate::components::vc_derivation_info::VcCommitMaterial>,
 }
@@ -179,13 +193,20 @@ impl UnresolvedAppDataCommit {
     pub(crate) fn new(
         content: AuthenticatedContent,
         proposals: Vec<AppDataUpdateProposal>,
+        lifetime_policy: LeafNodeLifetimePolicy,
     ) -> Self {
         Self {
             content,
             proposals,
+            lifetime_policy,
             #[cfg(feature = "virtual-clients-draft")]
             vc_commit_material: None,
         }
+    }
+
+    /// The lifetime policy the commit was processed with.
+    pub(crate) fn lifetime_policy(&self) -> LeafNodeLifetimePolicy {
+        self.lifetime_policy
     }
 
     /// Consumes the commit and returns the verified [`AuthenticatedContent`],
@@ -247,8 +268,24 @@ impl MlsGroup {
         provider: &Provider,
         message: impl Into<ProtocolMessage>,
     ) -> Result<ProcessedMessage, ProcessMessageError<Provider::StorageError>> {
+        self.process_message_with_lifetime_policy(provider, message, LeafNodeLifetimePolicy::Verify)
+    }
+
+    /// Like [`Self::process_message`], but uses the caller's leaf lifetime policy.
+    /// The policy is not persisted on the group.
+    pub fn process_message_with_lifetime_policy<Provider: OpenMlsProvider>(
+        &mut self,
+        provider: &Provider,
+        message: impl Into<ProtocolMessage>,
+        lifetime_policy: LeafNodeLifetimePolicy,
+    ) -> Result<ProcessedMessage, ProcessMessageError<Provider::StorageError>> {
         match self.unprotect_message(provider, message)? {
-            UnprotectedMessage::Unverified(m) => self.process_unverified_message(provider, *m),
+            UnprotectedMessage::Unverified {
+                message,
+                ratchet_update,
+            } => {
+                self.process_unverified_message(provider, *message, ratchet_update, lifetime_policy)
+            }
             // The content cannot be decrypted and the sender claim is unauthenticated,
             // so we surface OwnPrivateMessage and skip all further processing.
             UnprotectedMessage::OwnPrivateMessage {
@@ -314,9 +351,7 @@ impl MlsGroup {
         // Parse the message
         let sender_ratchet_configuration = *self.configuration().sender_ratchet_configuration();
 
-        // Check if this message will modify the secret tree when decrypting a
-        // private message
-        let will_modify_secret_tree = matches!(message, ProtocolMessage::PrivateMessage(_));
+        let epoch = message.epoch();
 
         // Resolve the emulator reuse-guard context for `PrivateMessage`
         // before calling `decrypt_message` so storage errors surface as
@@ -363,16 +398,11 @@ impl MlsGroup {
             emulator_ctx.as_ref(),
         )?;
 
-        // Persist the secret tree if it was modified to ensure forward secrecy
-        if will_modify_secret_tree {
-            provider
-                .storage()
-                .write_message_secrets(self.group_id(), &self.message_secrets_store)
-                .map_err(ProcessMessageError::StorageError)?;
-        }
-
-        let decrypted_message = match decrypt_result {
-            InboundDecryptionResult::Decrypted(decrypted_message) => decrypted_message,
+        let (decrypted_message, ratchet_update) = match decrypt_result {
+            InboundDecryptionResult::Decrypted {
+                message,
+                ratchet_update,
+            } => (message, ratchet_update),
             // Own private messages short-circuit here: there is no content
             // to parse or verify.
             InboundDecryptionResult::OwnPrivateMessage {
@@ -391,7 +421,10 @@ impl MlsGroup {
             .parse_message(decrypted_message, &self.message_secrets_store)
             .map_err(ProcessMessageError::from)?;
 
-        Ok(UnprotectedMessage::Unverified(Box::new(unverified_message)))
+        Ok(UnprotectedMessage::Unverified {
+            message: Box::new(unverified_message),
+            ratchet_update: ratchet_update.map(|update| EpochRatchetUpdate { epoch, update }),
+        })
     }
 
     /// Stores a standalone proposal in the internal [ProposalStore]
@@ -762,6 +795,7 @@ impl MlsGroup {
         app_data_dict_updates: Option<AppDataUpdates>,
     ) -> Result<StagedCommit, StageCommitError> {
         let content = unresolved_commit.content;
+        let lifetime_policy = unresolved_commit.lifetime_policy;
         #[cfg(feature = "virtual-clients-draft")]
         let vc_commit_material = unresolved_commit.vc_commit_material;
 
@@ -774,6 +808,7 @@ impl MlsGroup {
             leaf_node_keypairs,
             app_data_dict_updates,
             provider,
+            lifetime_policy,
             #[cfg(feature = "virtual-clients-draft")]
             vc_commit_material,
         )
@@ -829,19 +864,85 @@ impl MlsGroup {
     ///  - ValSem204: Public keys from Path must be verified and match the
     ///    private keys from the direct path
     ///  - ValSem205
+    ///
+    /// Applies and persists `ratchet_update` only if processing succeeds.
     pub(crate) fn process_unverified_message<Provider: OpenMlsProvider>(
-        &self,
+        &mut self,
         provider: &Provider,
         unverified_message: UnverifiedMessage,
+        ratchet_update: Option<EpochRatchetUpdate>,
+        lifetime_policy: LeafNodeLifetimePolicy,
     ) -> Result<ProcessedMessage, ProcessMessageError<Provider::StorageError>> {
         // Checks the following semantic validation:
         //  - ValSem010
         //  - ValSem246 (as part of ValSem010)
         //  - https://validation.openmls.tech/#valn1302
         //  - https://validation.openmls.tech/#valn1304
-        let verified =
-            unverified_message.verify(self.ciphersuite(), provider.crypto(), self.version())?;
+        let verified = unverified_message.verify(
+            self.ciphersuite(),
+            provider.crypto(),
+            self.version(),
+            lifetime_policy,
+        )?;
 
+        let processed = self.process_verified_message(provider, verified, lifetime_policy)?;
+
+        if let Some(ratchet_update) = ratchet_update {
+            self.apply_ratchet_update(provider, ratchet_update)?;
+        }
+
+        Ok(processed)
+    }
+
+    /// Applies a sender ratchet change from decrypting a PrivateMessage and
+    /// persists the message secrets.
+    fn apply_ratchet_update<Provider: OpenMlsProvider>(
+        &mut self,
+        provider: &Provider,
+        ratchet_update: EpochRatchetUpdate,
+    ) -> Result<(), ProcessMessageError<Provider::StorageError>> {
+        let sender_ratchet_configuration = *self.configuration().sender_ratchet_configuration();
+        let epoch = ratchet_update.epoch;
+        let rollback = self
+            .message_secrets_for_epoch_mut(epoch)
+            .and_then(|message_secrets| {
+                message_secrets
+                    .secret_tree_mut()
+                    .apply_decryption_update_for_storage(
+                        ratchet_update.update,
+                        &sender_ratchet_configuration,
+                    )
+            })
+            .map_err(|_| {
+                LibraryError::custom("Message secrets of a decrypted message are missing")
+            })?;
+        // This exclusive operation makes persistence the commit point. On a
+        // rejected write, restore the prior sender before returning the error
+        // so the caller can retry the same authenticated message.
+        if let Err(error) = provider
+            .storage()
+            .write_message_secrets(self.group_id(), &self.message_secrets_store)
+        {
+            self.message_secrets_for_epoch_mut(epoch)
+                .and_then(|message_secrets| {
+                    message_secrets
+                        .secret_tree_mut()
+                        .restore_after_failed_storage(rollback)
+                })
+                .map_err(|_| {
+                    LibraryError::custom("Cannot restore sender ratchet after storage failure")
+                })?;
+            return Err(ProcessMessageError::StorageError(error));
+        }
+        Ok(())
+    }
+
+    fn process_verified_message<Provider: OpenMlsProvider>(
+        &self,
+        provider: &Provider,
+        verified: VerifiedMessage,
+        lifetime_policy: LeafNodeLifetimePolicy,
+    ) -> Result<ProcessedMessage, ProcessMessageError<Provider::StorageError>> {
         #[cfg_attr(not(feature = "extensions-draft"), allow(unused_mut))]
         let mut processed = match verified.content.sender() {
             Sender::Member(_) | Sender::NewMemberProposal | Sender::NewMemberCommit => self
@@ -849,6 +950,7 @@ impl MlsGroup {
                     provider,
                     verified.content,
                     verified.credential,
+                    lifetime_policy,
                     #[cfg(feature = "virtual-clients-draft")]
                     verified.emulator_sender_leaf_index,
                 )?,
@@ -872,6 +974,7 @@ impl MlsGroup {
         provider: &Provider,
         content: AuthenticatedContent,
         credential: Credential,
+        lifetime_policy: LeafNodeLifetimePolicy,
         #[cfg(feature = "virtual-clients-draft")] emulator_sender_leaf_index: Option<LeafNodeIndex>,
     ) -> Result<ProcessedMessage, ProcessMessageError<Provider::StorageError>> {
         let sender = content.sender().clone();
@@ -979,6 +1082,7 @@ impl MlsGroup {
                         let unresolved_commit = UnresolvedAppDataCommit {
                             content,
                             proposals: app_data_update_proposals,
+                            lifetime_policy,
                             #[cfg(feature = "virtual-clients-draft")]
                             vc_commit_material,
                         };
@@ -1006,6 +1110,7 @@ impl MlsGroup {
                     old_epoch_keypairs,
                     leaf_node_keypairs,
                     provider,
+                    lifetime_policy,
                     #[cfg(feature = "virtual-clients-draft")]
                     vc_commit_material,
                 )?;
@@ -1164,7 +1269,10 @@ impl MlsGroup {
                     crypto,
                     self.ciphersuite(),
                 )
-                .map(InboundDecryptionResult::Decrypted)
+                .map(|message| InboundDecryptionResult::Decrypted {
+                    message,
+                    ratchet_update: None,
+                })
             }
             ProtocolMessage::PrivateMessage(ciphertext) => {
                 // If the message is older than the current epoch, we need to fetch the correct secret tree first

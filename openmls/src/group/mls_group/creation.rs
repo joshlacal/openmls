@@ -577,9 +577,7 @@ impl StagedWelcome {
         let sender_index = self.welcome_sender_index();
         self.public_group
             .leaf(sender_index)
-            .ok_or(LibraryError::custom(
-                "no leaf with given welcome sender index exists",
-            ))
+            .ok_or_else(|| LibraryError::custom("no leaf with given welcome sender index exists"))
     }
 
     /// Returns the leaf index of the client in this welcome's [`PublicGroup`].
@@ -1003,13 +1001,20 @@ impl MlsGroup {
 
         // Parse and verify the external commit against the prior-epoch group.
         // A PrivateMessage claiming our own leaf cannot be an external commit.
-        let processing::UnprotectedMessage::Unverified(unverified) =
-            group.unprotect_message(provider, external_commit)?
+        let processing::UnprotectedMessage::Unverified {
+            message: unverified,
+            ..
+        } = group.unprotect_message(provider, external_commit)?
         else {
             return Err(Error::NotAnExternalCommit);
         };
         let verified = unverified
-            .verify(group.ciphersuite(), provider.crypto(), group.version())
+            .verify(
+                group.ciphersuite(),
+                provider.crypto(),
+                group.version(),
+                LeafNodeLifetimePolicy::default(),
+            )
             .map_err(ProcessMessageError::from)?;
         if !matches!(verified.content.sender(), Sender::NewMemberCommit) {
             return Err(Error::NotAnExternalCommit);
@@ -1028,7 +1033,14 @@ impl MlsGroup {
         if material.epoch_id != epoch_id {
             return Err(Error::EpochIdMismatch);
         }
-        let staged = group.stage_commit(&content, vec![], vec![], provider, Some(material))?;
+        let staged = group.stage_commit(
+            &content,
+            vec![],
+            vec![],
+            provider,
+            LeafNodeLifetimePolicy::default(),
+            Some(material),
+        )?;
         group.merge_staged_commit(provider, staged)?;
         group.resize_message_secrets_store(join_config.past_epoch_deletion_policy());
         group
@@ -1259,18 +1271,20 @@ impl MlsGroup {
     }
 }
 
-/// Verify or skip the validation of leaf node lifetimes in the ratchet tree
-/// when joining a group.
+/// How the lifetime of a leaf node is checked.
 #[derive(Default, Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum LeafNodeLifetimePolicy {
-    /// Verify the lifetime of leaf nodes in the ratchet tree.
-    ///
-    /// **NOTE:** Only leaf nodes that have never been updated have a lifetime.
+    /// Check the lifetime against the current time.
     #[default]
     Verify,
 
-    /// Skip the verification of the lifeimte in leaf nodes in the ratchet tree.
+    /// Do not check the lifetime.
     Skip,
+
+    /// Check the lifetime against the given time, in seconds since the Unix
+    /// epoch, instead of the current time. Both lifetime boundaries are strict:
+    /// `not_before < time < not_after`, matching historical Catbird replay.
+    VerifyAt(u64),
 }
 
 /// Builder for joining a group.
@@ -1314,6 +1328,14 @@ impl<'a, Provider: OpenMlsProvider> JoinBuilder<'a, Provider> {
     /// By default they are validated.
     pub fn skip_lifetime_validation(mut self) -> Self {
         self.validate_lifetimes = LeafNodeLifetimePolicy::Skip;
+        self
+    }
+
+    /// Sets how the lifetimes of leaf nodes in the ratchet tree are checked.
+    /// [`Self::skip_lifetime_validation`] is the same as passing
+    /// [`LeafNodeLifetimePolicy::Skip`].
+    pub fn leaf_node_lifetime_policy(mut self, lifetime_policy: LeafNodeLifetimePolicy) -> Self {
+        self.validate_lifetimes = lifetime_policy;
         self
     }
 

@@ -16,8 +16,8 @@ use crate::{
     group::{
         diff::compute_path::{CommitType, PathComputationResult},
         CommitBuilderStageError, CreateCommitError, Extension, ExternalPubExtension, GroupContext,
-        ProposalQueue, ProposalQueueError, QueuedProposal, RatchetTreeExtension, StagedCommit,
-        WireFormatPolicy,
+        LeafNodeLifetimePolicy, ProposalQueue, ProposalQueueError, QueuedProposal,
+        RatchetTreeExtension, StagedCommit, WireFormatPolicy,
     },
     key_packages::KeyPackage,
     messages::{
@@ -95,6 +95,9 @@ use super::HandshakeConfirmationData;
 #[derive(Debug)]
 struct ExternalCommitInfo {
     aad: Vec<u8>,
+    /// The authoritative credential and signature key for the external
+    /// committer's leaf. `build_internal` folds it into the leaf node
+    /// parameters and rejects parameters that pin a different credential.
     credential: CredentialWithKey,
     wire_format_policy: WireFormatPolicy,
 }
@@ -117,6 +120,9 @@ pub struct Initial {
     /// Whether or not to clear the proposal queue of the group when staging the commit. Needs to
     /// be done when we include the commits that have already been queued.
     consume_proposal_store: bool,
+
+    /// How the lifetimes of the key packages in Add proposals are checked.
+    lifetime_policy: LeafNodeLifetimePolicy,
 }
 
 impl Default for Initial {
@@ -127,6 +133,7 @@ impl Default for Initial {
             leaf_node_parameters: LeafNodeParameters::default(),
             own_proposals: vec![],
             external_commit_info: None,
+            lifetime_policy: LeafNodeLifetimePolicy::Verify,
         }
     }
 }
@@ -146,6 +153,8 @@ pub struct LoadedPsks {
     /// The GroupInfo creation config
     group_info_config: GroupInfoConfig,
 
+    /// How the lifetimes of the key packages in Add proposals are checked.
+    lifetime_policy: LeafNodeLifetimePolicy,
     #[cfg(feature = "extensions-draft")]
     app_data_dictionary_updates: Option<AppDataUpdates>,
 }
@@ -358,6 +367,12 @@ impl<'a, G: BorrowMut<MlsGroup>> CommitBuilder<'a, Initial, G> {
         self
     }
 
+    /// Sets the per-call lifetime policy for Add proposal key packages.
+    pub fn leaf_node_lifetime_policy(mut self, lifetime_policy: LeafNodeLifetimePolicy) -> Self {
+        self.stage.lifetime_policy = lifetime_policy;
+        self
+    }
+
     /// Opt this commit into the virtual-clients-draft sender flow.
     ///
     /// The application supplies the [`EpochId`] of an already-registered
@@ -532,6 +547,7 @@ impl<'a, G: BorrowMut<MlsGroup>> CommitBuilder<'a, Initial, G> {
                         consume_proposal_store: stage.consume_proposal_store,
                         group_info_config,
                         external_commit_info: stage.external_commit_info,
+                        lifetime_policy: stage.lifetime_policy,
                         #[cfg(feature = "extensions-draft")]
                         app_data_dictionary_updates: None,
                     },
@@ -602,7 +618,19 @@ impl<'a, G: BorrowMut<MlsGroup>> CommitBuilder<'a, LoadedPsks, G> {
     /// the application to enforce custom policies in the creation of commits.
     ///
     /// In contrast to `build`, this function can be used to create commits that
-    /// rotate the own leaf node's signature key.
+    /// rotate the own leaf node's signature key. Supplying a new signer implies
+    /// a self-update: the commit always contains an UpdatePath that installs
+    /// the new signature key in the committer's leaf, even if no proposal
+    /// requires a path.
+    ///
+    /// The Commit message itself is signed with `old_signer`, because
+    /// receivers verify it against the committer's pre-commit leaf. GroupInfo
+    /// objects created for this commit are signed with the new signer,
+    /// matching the post-commit leaf.
+    ///
+    /// Returns an error if the new signer's signature scheme does not match the
+    /// group's ciphersuite, or when used on an external commit. External commits
+    /// take their credential and signer from the external commit builder.
     pub fn build_with_new_signer<S: Signer>(
         self,
         rand: &impl OpenMlsRand,
@@ -611,6 +639,12 @@ impl<'a, G: BorrowMut<MlsGroup>> CommitBuilder<'a, LoadedPsks, G> {
         new_signer: NewSignerBundle<'_, S>,
         f: impl FnMut(&QueuedProposal) -> bool,
     ) -> Result<CommitBuilder<'a, Complete, G>, CreateCommitError> {
+        // On an external commit, the signer passed to the external commit
+        // builder signs the Commit, the UpdatePath leaf and the GroupInfo, so
+        // a new signer cannot be used.
+        if self.stage.external_commit_info.is_some() {
+            return Err(CreateCommitError::ExternalCommitWithNewSigner);
+        }
         self.build_internal(rand, crypto, old_signer, Some(new_signer), f)
     }
 
@@ -631,6 +665,7 @@ impl<'a, G: BorrowMut<MlsGroup>> CommitBuilder<'a, LoadedPsks, G> {
             use_ratchet_tree_extension,
             other_extensions,
         } = cur_stage.group_info_config;
+        let lifetime_policy = cur_stage.lifetime_policy;
 
         let group = builder.group.borrow();
         let ciphersuite = group.ciphersuite();
@@ -640,6 +675,49 @@ impl<'a, G: BorrowMut<MlsGroup>> CommitBuilder<'a, LoadedPsks, G> {
             Some(_) => (Sender::NewMemberCommit, true),
         };
         let psks = cur_stage.psks;
+
+        // An external commit has exactly one authoritative credential and
+        // signature key: the ones passed to the external commit builder. Leaf
+        // node parameters that pin a different credential are rejected, and
+        // the authoritative credential is folded into the parameters here so
+        // the rest of the commit flow only sees a single value.
+        if let Some(ExternalCommitInfo { credential, .. }) = &cur_stage.external_commit_info {
+            if let Some(params_credential) = cur_stage.leaf_node_parameters.credential_with_key() {
+                if params_credential != credential {
+                    return Err(CreateCommitError::ExternalCommitCredentialMismatch);
+                }
+            }
+            cur_stage
+                .leaf_node_parameters
+                .set_credential_with_key(credential.clone());
+        }
+
+        // Fold the new signer's credential into the leaf node parameters. The
+        // new signature key is installed in the committer's leaf through the
+        // UpdatePath, so parameters that pin a different credential are
+        // rejected.
+        let new_signer = match new_signer {
+            Some(NewSignerBundle {
+                signer,
+                credential_with_key,
+            }) => {
+                if ciphersuite.signature_algorithm() != signer.signature_scheme() {
+                    return Err(CreateCommitError::InvalidSignerCiphersuite);
+                }
+                if let Some(params_credential) =
+                    cur_stage.leaf_node_parameters.credential_with_key()
+                {
+                    if params_credential != &credential_with_key {
+                        return Err(CreateCommitError::InvalidLeafNodeParameters);
+                    }
+                }
+                cur_stage
+                    .leaf_node_parameters
+                    .set_credential_with_key(credential_with_key);
+                Some(signer)
+            }
+            None => None,
+        };
 
         // put the pending and uniform proposals into a uniform shape,
         // i.e. produce queued proposals from the own proposals
@@ -690,7 +768,9 @@ impl<'a, G: BorrowMut<MlsGroup>> CommitBuilder<'a, LoadedPsks, G> {
             .public_group
             .validate_key_uniqueness(&proposal_queue, None)?;
         // ValSem105
-        group.public_group.validate_add_proposals(&proposal_queue)?;
+        group
+            .public_group
+            .validate_add_proposals(&proposal_queue, lifetime_policy)?;
         // ValSem106
         // ValSem109
         group.public_group.validate_capabilities(&proposal_queue)?;
@@ -782,47 +862,37 @@ impl<'a, G: BorrowMut<MlsGroup>> CommitBuilder<'a, LoadedPsks, G> {
         #[cfg(not(feature = "virtual-clients-draft"))]
         let own_update_override: Option<crate::treesync::diff::OwnUpdatePathOverride> = None;
 
+        // A new signer always requires a path: the new signature key only
+        // becomes part of the group state through the UpdatePath leaf.
         let path_computation_result =
             // If path is needed, compute path values
             if apply_proposals_values.path_required
                 || contains_own_updates
                 || cur_stage.force_self_update
                 || !cur_stage.leaf_node_parameters.is_empty()
+                || new_signer.is_some()
             {
-                let commit_type = match &cur_stage.external_commit_info {
-                    Some(ExternalCommitInfo { credential , ..}) => {
-                        CommitType::External(credential.clone())
-                    }
-                    None => CommitType::Member,
+                let commit_type = if is_external_commit {
+                    CommitType::External
+                } else {
+                    CommitType::Member
                 };
                 // Process the path. This includes updating the provisional
                 // group context by updating the epoch and computing the new
                 // tree hash.
-                if let Some(new_signer) = new_signer {
-                    if let Some(credential_with_key) =
-                        cur_stage.leaf_node_parameters.credential_with_key()
-                    {
-                        if credential_with_key != &new_signer.credential_with_key {
-                            return Err(CreateCommitError::InvalidLeafNodeParameters);
-                        }
-                    }
-                    cur_stage.leaf_node_parameters.set_credential_with_key(
-                        new_signer.credential_with_key,
-                    );
-
-                    diff.compute_path(
+                match new_signer {
+                    Some(new_signer) => diff.compute_path(
                         rand,
                         crypto,
                         own_leaf_index,
                         apply_proposals_values.exclusion_list(),
                         &commit_type,
                         &cur_stage.leaf_node_parameters,
-                        new_signer.signer,
+                        new_signer,
                         apply_proposals_values.extensions.clone(),
                         own_update_override,
-                    )?
-                } else {
-                    diff.compute_path(
+                    )?,
+                    None => diff.compute_path(
                         rand,
                         crypto,
                         own_leaf_index,
@@ -832,7 +902,7 @@ impl<'a, G: BorrowMut<MlsGroup>> CommitBuilder<'a, LoadedPsks, G> {
                         old_signer,
                         apply_proposals_values.extensions.clone(),
                         own_update_override,
-                    )?
+                    )?,
                 }
             } else {
                 // If path is not needed, update the group context and return
@@ -1008,8 +1078,13 @@ impl<'a, G: BorrowMut<MlsGroup>> CommitBuilder<'a, LoadedPsks, G> {
                             own_leaf_index,
                         )?
                     };
-                    // Sign to-be-signed group info.
-                    let group_info = group_info_tbs.sign(old_signer)?;
+                    // Sign to-be-signed group info. Joiners verify this against
+                    // the own leaf node in the post-commit ratchet tree, so a
+                    // rotated signature key has to be used here as well.
+                    let group_info = match new_signer {
+                        Some(new_signer) => group_info_tbs.sign(new_signer)?,
+                        None => group_info_tbs.sign(old_signer)?,
+                    };
 
                     // Encrypt GroupInfo object
                     let (welcome_key, welcome_nonce) = welcome_secret
@@ -1067,8 +1142,14 @@ impl<'a, G: BorrowMut<MlsGroup>> CommitBuilder<'a, LoadedPsks, G> {
                             own_leaf_index,
                         )?
                     };
-                    // Sign to-be-signed group info.
-                    Ok(group_info_tbs.sign(old_signer)?)
+                    // Sign to-be-signed group info. Like the Welcome's
+                    // GroupInfo, this is verified against the post-commit
+                    // ratchet tree, so a rotated signature key has to be used
+                    // here as well.
+                    match new_signer {
+                        Some(new_signer) => Ok(group_info_tbs.sign(new_signer)?),
+                        None => Ok(group_info_tbs.sign(old_signer)?),
+                    }
                 })
                 .transpose()?;
 
@@ -1381,9 +1462,11 @@ impl TryFrom<CommitMessageBundle> for WelcomeCommitMessages {
         let (commit, welcome_opt, group_info) = value.into_messages();
         Ok(Self {
             commit,
-            welcome: welcome_opt.ok_or(LibraryError::custom(
-                "WelcomeCommitMessages must only be used with commits that produce a welcome.",
-            ))?,
+            welcome: welcome_opt.ok_or_else(|| {
+                LibraryError::custom(
+                    "WelcomeCommitMessages must only be used with commits that produce a welcome.",
+                )
+            })?,
             group_info,
         })
     }

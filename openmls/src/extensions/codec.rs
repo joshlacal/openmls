@@ -5,18 +5,18 @@ use tls_codec::{Deserialize, DeserializeBytes, Serialize, Size, VLBytes};
 use crate::extensions::{Extension, ExtensionType, UnknownExtension};
 
 /// Known extension types must consume the bounded payload without silently dropping trailing bytes.
-fn deserialize_extension_exact<T: Deserialize>(
+pub(super) fn deserialize_extension_exact<T: Deserialize>(
     extension_data: &[u8],
 ) -> Result<T, tls_codec::Error> {
     T::tls_deserialize_exact(extension_data)
 }
 
 fn vlbytes_len_len(length: usize) -> usize {
-    if length < 0x40 {
+    if length <= 0x3f {
         1
-    } else if length < 0x3fff {
+    } else if length <= 0x3fff {
         2
-    } else if length < 0x3fff_ffff {
+    } else if length <= 0x3fff_ffff {
         4
     } else {
         8
@@ -141,8 +141,7 @@ impl DeserializeBytes for Extension {
     {
         let mut bytes_ref = bytes;
         let extension = Extension::tls_deserialize(&mut bytes_ref)?;
-        let remainder = &bytes[extension.tls_serialized_len()..];
-        Ok((extension, remainder))
+        Ok((extension, bytes_ref))
     }
 }
 

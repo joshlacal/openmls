@@ -19,7 +19,7 @@ use crate::{
     credentials::CredentialWithKey,
     error::LibraryError,
     framing::SenderContext,
-    group::errors::ValidationError,
+    group::{errors::ValidationError, LeafNodeLifetimePolicy},
     schedule::{psk::PreSharedKeyId, JoinerSecret},
     treesync::{
         node::{
@@ -237,11 +237,12 @@ impl CommitIn {
         crypto: &impl OpenMlsCrypto,
         sender_context: SenderContext,
         protocol_version: ProtocolVersion,
+        lifetime_policy: LeafNodeLifetimePolicy,
     ) -> Result<Commit, ValidationError> {
         let proposals = self
             .proposals
             .into_iter()
-            .map(|p| p.validate(crypto, ciphersuite, protocol_version))
+            .map(|p| p.validate(crypto, ciphersuite, protocol_version, lifetime_policy))
             .collect::<Result<Vec<_>, _>>()?;
 
         let path = if let Some(path) = self.path {
@@ -279,9 +280,11 @@ impl CommitIn {
                         .chain(former_sender_index)
                         .chain(self_removed_indices)
                         .min()
-                        .ok_or(ValidationError::LibraryError(LibraryError::custom(
-                            "The iterator should have at least one element.",
-                        )))?;
+                        .ok_or_else(|| {
+                            ValidationError::LibraryError(LibraryError::custom(
+                                "The iterator should have at least one element.",
+                            ))
+                        })?;
 
                     TreePosition::new(group_id, new_leaf_index)
                 }

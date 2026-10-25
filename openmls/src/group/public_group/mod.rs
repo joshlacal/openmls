@@ -65,8 +65,16 @@ pub(crate) mod staged_commit;
 mod tests;
 mod validation;
 
+#[cfg(feature = "migration-import")]
+mod migration_import;
+
 /// This struct holds all public values of an MLS group.
 #[derive(Debug)]
+#[cfg_attr(feature = "migration-import", derive(serde::Deserialize))]
+#[cfg_attr(
+    all(feature = "test-utils", feature = "migration-import"),
+    derive(serde::Serialize)
+)]
 #[cfg_attr(any(test, feature = "test-utils"), derive(PartialEq, Clone))]
 pub struct PublicGroup {
     treesync: TreeSync,
@@ -124,12 +132,35 @@ impl PublicGroup {
     where
         StorageProvider: PublicStorageProvider<Error = StorageError>,
     {
+        Self::from_external_with_lifetime_policy(
+            crypto,
+            storage,
+            ratchet_tree,
+            verifiable_group_info,
+            proposal_store,
+            LeafNodeLifetimePolicy::Verify,
+        )
+    }
+
+    /// Like [`Self::from_external`], but checks the lifetimes of the leaf nodes
+    /// in the ratchet tree under `lifetime_policy`.
+    pub fn from_external_with_lifetime_policy<StorageProvider, StorageError>(
+        crypto: &impl OpenMlsCrypto,
+        storage: &StorageProvider,
+        ratchet_tree: RatchetTreeIn,
+        verifiable_group_info: VerifiableGroupInfo,
+        proposal_store: ProposalStore,
+        lifetime_policy: LeafNodeLifetimePolicy,
+    ) -> Result<(Self, GroupInfo), CreationFromExternalError<StorageError>>
+    where
+        StorageProvider: PublicStorageProvider<Error = StorageError>,
+    {
         let (public_group, group_info) = PublicGroup::from_ratchet_tree(
             crypto,
             ratchet_tree,
             verifiable_group_info,
             proposal_store,
-            LeafNodeLifetimePolicy::Verify,
+            lifetime_policy,
         )?;
 
         public_group
@@ -231,7 +262,14 @@ impl PublicGroup {
                                 // None would be blank, and we don't care about those
                                 if let Some(intermediate_node) = treesync
                                     .parent(*intermediate_index) {
-                                    if !intermediate_node.unmerged_leaves().contains(leaf_index) {
+                                    // The list of unmerged leaves is sorted,
+                                    // which UnmergedLeaves enforces when it is
+                                    // deserialized from the wire.
+                                    if intermediate_node
+                                        .unmerged_leaves()
+                                        .binary_search(leaf_index)
+                                        .is_err()
+                                    {
                                         return Err(CreationFromExternalError::<StorageError>::IntermediateNodeMissingUnmergedLeaf);
                                     }
                                 }
@@ -290,7 +328,7 @@ impl PublicGroup {
             .treesync
             .full_leaves()
             .try_for_each(|(_, leaf_node)| {
-                public_group.validate_leaf_node_inner(leaf_node, validate_lifetimes)
+                public_group.validate_leaf_node(leaf_node, validate_lifetimes)
             })?;
 
         Ok((public_group, group_info))
