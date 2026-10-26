@@ -1,7 +1,8 @@
 # Catbird OpenMLS Compatibility Fork (0.9.2-pr2257)
 
-This repository is a minimal fork of OpenMLS targeting `v0.9.2` plus a single
-verbatim backport of upstream PR 2257.
+This repository is a minimal fork of OpenMLS targeting `v0.9.2` plus:
+1. A verbatim backport of upstream PR 2257 (`LeafNodeLifetimePolicy::VerifyAt`), and
+2. `openmls_sqlite_storage` widened to `rusqlite 0.41` (with vendored `refinery 0.10`) under the storage-CVE exception in `docs/handoffs/2026-10-25-openmls-fork-reduction.md`.
 
 - **Base upstream release:** `v0.9.2` (`8a8f83b4b61fc45f28facec25e914992b3465de6`)
 - **Backported commit:** `044d8af408dfe3b1bfba27d423f7ad70e4312326` (PR 2257: "feat: pass the leaf node lifetime policy per call")
@@ -17,14 +18,18 @@ using `LeafNodeLifetimePolicy::VerifyAt(sealed_receive_time)`.
 Upstream PR 2257 introduced `LeafNodeLifetimePolicy::VerifyAt(u64)` and wired the
 lifetime policy into message processing, commit staging, and external group creation.
 PR 2257 merged to upstream `main` on 2026-10-19, but was not included in `v0.9.2`
-(which branched earlier and released on 2026-10-22). This fork provides that single
+(which branched earlier and released on 2026-10-22). This fork provides that
 upstream feature on top of the stable `v0.9.2` release without carrying unreleased
-`main` breaking changes (such as async storage traits).
+`main` breaking changes (such as async storage traits), together with the `rusqlite 0.41`
+storage bump required to avoid the SQLite 3.46.1 `concat_ws` CVE in `libsqlite3-sys 0.35.0`'s
+bundled SQLCipher amalgamation.
 
 ## Delete-When Condition
 
 **Delete this fork entirely and return to upstream OpenMLS** as soon as an upstream
-OpenMLS release contains PR 2257 (OpenMLS 0.10.0 or 0.9.3+).
+OpenMLS release contains PR 2257 and an `openmls_sqlite_storage` dependency floor whose
+bundled SQLCipher amalgamation includes SQLite >= 3.49.1 (or when upstream `refinery`
+supports `rusqlite >= 0.39`).
 
 ## Lifetime Semantics
 
@@ -39,25 +44,29 @@ Under the 2026-10-25 architectural decision for a fresh start (no backward
 compatibility required for legacy pre-release stores or legacy cipher suites):
 
 1. **Patch 2 (Sender-ratchet rollback):** Dropped from the fork. Caching failures are
-   handled in `catbird-mls` via evict-and-reload on storage error.
+   handled in `catbird-mls` via transactional SQLite savepoints plus evict-and-reload on storage error.
 2. **Patch 3 (`legacy-pq-key-derivation`):** Dropped completely. Groups use standard
    upstream derivation.
 3. **Patch 4 (Newer crypto provider dependencies):** Dropped. Upstream `v0.9.2` shipped
    provider versions are used.
-4. **Patch 5 (Vendored Refinery / widened rusqlite):** Dropped. Upstream `v0.9.2`
-   uses `rusqlite 0.37` + `refinery 0.9`. The `vendor/` directory was archived to
-   `_trash/openmls_vendor`.
 
-## SQLite / SQLCipher CVE Posture Verification
+## Retained Storage Exception (Patch 5 — SQLCipher CVE-2025-3277 / CVE-2025-29087)
 
-The upstream SQLite stack was audited:
-- `openmls_sqlite_storage 0.3.0` uses `rusqlite 0.37.0` and `refinery 0.9.2`.
-- `rusqlite 0.37.0` with `bundled` uses `libsqlite3-sys 0.35.0`, bundling SQLite `3.50.2`
-  (which includes the fix for CVE-2025-6965).
-- With `bundled-sqlcipher`, `libsqlite3-sys 0.35.0` bundles SQLCipher `4.6.1` (based on
-  SQLite 3.46.1).
-- Audit against the RustSec Advisory Database and public CVE indices confirms zero
-  published or outstanding CVEs for the bundled libraries in `rusqlite 0.37.0`.
+The earlier claim that `rusqlite 0.37.0` (`libsqlite3-sys 0.35.0`) had zero CVEs was
+withdrawn after auditing the separate `bundled-sqlcipher` C amalgamation:
+- While `libsqlite3-sys 0.35.0` bundles SQLite `3.50.2` for plain `bundled` builds (`sqlite3/sqlite3.c`),
+  its `bundled-sqlcipher` feature compiles `sqlcipher/sqlite3.c` (**SQLCipher 4.6.1**, based on
+  **SQLite 3.46.1**).
+- `sqlcipher/sqlite3.c:135336` (`n += (argc-1)*nSep;` in `concatFuncCore`) retains the 32-bit signed
+  integer overflow in `concat_ws()` covered by **CVE-2025-3277 / CVE-2025-29087** (fixed upstream in
+  SQLite 3.49.1 by casting `(i64)nSep`).
+- Because `libsqlite3-sys` is a links=`sqlite3` crate that permits only one version per Cargo dependency
+  graph, leaving `openmls_sqlite_storage` on `rusqlite 0.37` forces `catbird-mls` (`bundled-sqlcipher`)
+  onto `libsqlite3-sys 0.35.0`.
+- Per the explicit storage exception in `docs/handoffs/2026-10-25-openmls-fork-reduction.md`, Patch 5 is
+  retained: `openmls_sqlite_storage` uses `rusqlite 0.41` (`libsqlite3-sys 0.39.1` / `sqlcipher-src 419.0.6`,
+  which bundles **SQLCipher 4.19.0** based on **SQLite 3.53.4**, where `sqlcipher.c:141533` applies
+  `n += (argc-1)*(i64)nSep;`) and `vendor/refinery` `0.10.0` (with widened `rusqlite >= 0.28, <= 0.41`).
 
 ## Rebase & Conflict Resolutions (044d8af4 onto 8a8f83b4)
 
