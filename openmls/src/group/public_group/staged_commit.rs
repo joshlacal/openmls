@@ -2,7 +2,8 @@ use super::{super::errors::*, diff::apply_proposals::ApplyProposalsValues, *};
 use crate::{
     framing::{mls_auth_content::AuthenticatedContent, mls_content::FramedContentBody, Sender},
     group::{
-        mls_group::staged_commit::StagedCommitState, proposal_store::ProposalQueue, StagedCommit,
+        creation::LeafNodeLifetimeValidation, mls_group::staged_commit::StagedCommitState,
+        proposal_store::ProposalQueue, StagedCommit,
     },
     messages::{
         proposals::{ProposalOrRef, ProposalType},
@@ -50,6 +51,7 @@ impl PublicGroup {
         &self,
         mls_content: &'a AuthenticatedContent,
         crypto: &impl OpenMlsCrypto,
+        lifetime_validation: LeafNodeLifetimeValidation,
     ) -> Result<(&'a Commit, ProposalQueue, LeafNodeIndex), StageCommitError> {
         let ciphersuite = self.ciphersuite();
 
@@ -173,7 +175,10 @@ impl PublicGroup {
         // ValSem104
         self.validate_key_uniqueness(&proposal_queue, Some(commit))?;
         // ValSem105
-        self.validate_add_proposals(&proposal_queue)?;
+        self.validate_add_proposals_with_lifetime_validation(
+            &proposal_queue,
+            lifetime_validation,
+        )?;
         // ValSem106
         // ValSem109
         self.validate_capabilities(&proposal_queue)?;
@@ -290,8 +295,10 @@ impl PublicGroup {
         &self,
         mls_content: &AuthenticatedContent,
         crypto: &impl OpenMlsCrypto,
+        lifetime_validation: LeafNodeLifetimeValidation,
     ) -> Result<StagedCommit, StageCommitError> {
-        let (commit, proposal_queue, sender_index) = self.validate_commit(mls_content, crypto)?;
+        let (commit, proposal_queue, sender_index) =
+            self.validate_commit(mls_content, crypto, lifetime_validation)?;
 
         let staged_diff = self.stage_diff(mls_content, &proposal_queue, sender_index, crypto)?;
         let staged_state = PublicStagedCommitState {
@@ -314,9 +321,11 @@ impl PublicGroup {
         &self,
         mls_content: &AuthenticatedContent,
         crypto: &impl OpenMlsCrypto,
+        lifetime_validation: LeafNodeLifetimeValidation,
         app_data_dict_updates: Option<AppDataUpdates>,
     ) -> Result<StagedCommit, StageCommitError> {
-        let (commit, proposal_queue, sender_index) = self.validate_commit(mls_content, crypto)?;
+        let (commit, proposal_queue, sender_index) =
+            self.validate_commit(mls_content, crypto, lifetime_validation)?;
 
         let staged_diff = self.stage_diff_with_app_data_updates(
             mls_content,

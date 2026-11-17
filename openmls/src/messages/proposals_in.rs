@@ -7,7 +7,7 @@ use crate::{
     credentials::CredentialWithKey,
     extensions::{AnyObject, Extensions},
     framing::SenderContext,
-    group::errors::ValidationError,
+    group::{creation::LeafNodeLifetimeValidation, errors::ValidationError},
     key_packages::*,
     prelude::InvalidExtensionError,
     treesync::node::leaf_node::{LeafNodeIn, TreePosition, VerifiableLeafNode},
@@ -97,20 +97,23 @@ impl ProposalIn {
         self.proposal_type().is_path_required()
     }
 
-    /// Returns a [`Proposal`] after successful validation.
-    pub(crate) fn validate(
+    pub(crate) fn validate_with_lifetime_validation(
         self,
         crypto: &impl OpenMlsCrypto,
         ciphersuite: Ciphersuite,
         sender_context: Option<SenderContext>,
         protocol_version: ProtocolVersion,
+        lifetime_validation: LeafNodeLifetimeValidation,
     ) -> Result<Proposal, ValidationError> {
         Ok(match self {
-            ProposalIn::Add(add) => Proposal::Add(Box::new(add.validate(
-                crypto,
-                protocol_version,
-                ciphersuite,
-            )?)),
+            ProposalIn::Add(add) => Proposal::Add(Box::new(
+                add.validate_with_lifetime_validation(
+                    crypto,
+                    protocol_version,
+                    ciphersuite,
+                    lifetime_validation,
+                )?,
+            )),
             ProposalIn::Update(update) => {
                 let sender_context =
                     sender_context.ok_or(ValidationError::CommitterIncludedOwnUpdate)?;
@@ -167,14 +170,18 @@ impl AddProposalIn {
         self.key_package.unverified_credential()
     }
 
-    /// Returns a [`AddProposal`] after successful validation.
-    pub(crate) fn validate(
+    pub(crate) fn validate_with_lifetime_validation(
         self,
         crypto: &impl OpenMlsCrypto,
         protocol_version: ProtocolVersion,
         ciphersuite: Ciphersuite,
+        lifetime_validation: LeafNodeLifetimeValidation,
     ) -> Result<AddProposal, ValidationError> {
-        let key_package = self.key_package.validate(crypto, protocol_version)?;
+        let key_package = self.key_package.validate_with_lifetime_validation(
+            crypto,
+            protocol_version,
+            lifetime_validation,
+        )?;
         // Verify that the ciphersuite is valid
         if key_package.ciphersuite() != ciphersuite {
             return Err(ValidationError::InvalidAddProposalCiphersuite);
@@ -266,17 +273,25 @@ pub enum ProposalOrRefIn {
 }
 
 impl ProposalOrRefIn {
-    /// Returns a [`ProposalOrRef`] after successful validation.
-    pub(crate) fn validate(
+    pub(crate) fn validate_with_lifetime_validation(
         self,
         crypto: &impl OpenMlsCrypto,
         ciphersuite: Ciphersuite,
         protocol_version: ProtocolVersion,
+        lifetime_validation: LeafNodeLifetimeValidation,
     ) -> Result<ProposalOrRef, ValidationError> {
         Ok(match self {
-            ProposalOrRefIn::Proposal(proposal_in) => ProposalOrRef::Proposal(Box::new(
-                proposal_in.validate(crypto, ciphersuite, None, protocol_version)?,
-            )),
+            ProposalOrRefIn::Proposal(proposal_in) => {
+                ProposalOrRef::Proposal(Box::new(
+                    proposal_in.validate_with_lifetime_validation(
+                        crypto,
+                        ciphersuite,
+                        None,
+                        protocol_version,
+                        lifetime_validation,
+                    )?,
+                ))
+            }
             ProposalOrRefIn::Reference(reference) => ProposalOrRef::Reference(reference),
         })
     }

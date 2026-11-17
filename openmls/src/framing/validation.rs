@@ -30,7 +30,10 @@ use crate::{
     ciphersuite::signable::Verifiable,
     error::LibraryError,
     extensions::ExternalSendersExtension,
-    group::{errors::ValidationError, mls_group::staged_commit::StagedCommit},
+    group::{
+        creation::LeafNodeLifetimeValidation, errors::ValidationError,
+        mls_group::staged_commit::StagedCommit,
+    },
     tree::sender_ratchet::SenderRatchetConfiguration,
     versions::ProtocolVersion,
 };
@@ -372,14 +375,34 @@ impl UnverifiedMessage {
         crypto: &impl OpenMlsCrypto,
         protocol_version: ProtocolVersion,
     ) -> Result<VerifiedMessage, ValidationError> {
+        self.verify_with_lifetime_validation(
+            ciphersuite,
+            crypto,
+            protocol_version,
+            LeafNodeLifetimeValidation::Current,
+        )
+    }
+
+    pub(crate) fn verify_with_lifetime_validation(
+        self,
+        ciphersuite: Ciphersuite,
+        crypto: &impl OpenMlsCrypto,
+        protocol_version: ProtocolVersion,
+        lifetime_validation: LeafNodeLifetimeValidation,
+    ) -> Result<VerifiedMessage, ValidationError> {
         let content: AuthenticatedContentIn = self
             .verifiable_content
             .verify(crypto, &self.sender_pk)
             .map_err(|_| ValidationError::InvalidSignature)?;
         // https://validation.openmls.tech/#valn1302
         // https://validation.openmls.tech/#valn1304
-        let content =
-            content.validate(ciphersuite, crypto, self.sender_context, protocol_version)?;
+        let content = content.validate_with_lifetime_validation(
+            ciphersuite,
+            crypto,
+            self.sender_context,
+            protocol_version,
+            lifetime_validation,
+        )?;
         Ok(VerifiedMessage {
             content,
             credential: self.credential,

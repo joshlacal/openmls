@@ -5,6 +5,7 @@ use crate::{
     ciphersuite::{signable::*, *},
     credentials::*,
     extensions::{AnyObject, Extensions},
+    group::creation::LeafNodeLifetimeValidation,
     treesync::node::leaf_node::{LeafNodeIn, VerifiableLeafNode},
     versions::ProtocolVersion,
 };
@@ -138,6 +139,20 @@ impl KeyPackageIn {
         crypto: &impl OpenMlsCrypto,
         protocol_version: ProtocolVersion,
     ) -> Result<KeyPackage, KeyPackageVerifyError> {
+        self.validate_with_lifetime_validation(
+            crypto,
+            protocol_version,
+            LeafNodeLifetimeValidation::Current,
+        )
+    }
+
+    /// Validate a key package using the caller's leaf lifetime validation mode.
+    pub(crate) fn validate_with_lifetime_validation(
+        self,
+        crypto: &impl OpenMlsCrypto,
+        protocol_version: ProtocolVersion,
+        lifetime_validation: LeafNodeLifetimeValidation,
+    ) -> Result<KeyPackage, KeyPackageVerifyError> {
         // We first need to verify the LeafNode inside the KeyPackage
         let leaf_node = self.payload.leaf_node.clone().into_verifiable_leaf_node();
 
@@ -193,7 +208,11 @@ impl KeyPackageIn {
 
         // Ensure validity of the life time extension in the leaf node.
         if let Some(life_time) = key_package.payload.leaf_node.life_time() {
-            life_time.validate()?;
+            match lifetime_validation {
+                LeafNodeLifetimeValidation::Current => life_time.validate()?,
+                LeafNodeLifetimeValidation::At(instant) => life_time.validate_at(instant)?,
+                LeafNodeLifetimeValidation::Skip => {}
+            }
         } else {
             // This assumes that we only verify key packages with leaf nodes
             // that were created for the key package.

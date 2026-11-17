@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Added `PublicGroup::process_message_at` to validate Add KeyPackage lifetimes at a caller-supplied trusted Unix instant while preserving wall-clock validation in `process_message`.
+
 - [#1972](https://github.com/openmls/openmls/pull/1972): Add APIs for time-based deletion of past epoch secrets, and for setting the past epoch deletion policy for an `MlsGroup`.
 - [#2010](https://github.com/openmls/openmls/pull/2010): Added `MlsGroup::propose_self_update_with_new_signer`, a variant of `propose_self_update` that stages an `Update` proposal carrying a new signature key.
 - [#2084](https://github.com/openmls/openmls/pull/2084): Added the `ProcessedMessageContent::OwnPendingCommit` variant, returned when processing a Commit authored by this client that matches the group's pending commit. Callers should merge the pending commit via `MlsGroup::merge_pending_commit()`.

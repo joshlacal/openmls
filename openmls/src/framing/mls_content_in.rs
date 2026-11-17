@@ -5,7 +5,7 @@ use crate::{
     ciphersuite::signable::Signable,
     error::LibraryError,
     framing::SenderContext,
-    group::{errors::ValidationError, GroupEpoch, GroupId},
+    group::{creation::LeafNodeLifetimeValidation, errors::ValidationError, GroupEpoch, GroupId},
     messages::{proposals_in::ProposalIn, CommitIn},
     versions::ProtocolVersion,
 };
@@ -56,22 +56,26 @@ pub(crate) struct FramedContentIn {
 }
 
 impl FramedContentIn {
-    /// Returns a [`FramedContent`] after successful validation.
-    pub(crate) fn validate(
+    pub(crate) fn validate_with_lifetime_validation(
         self,
         ciphersuite: Ciphersuite,
         crypto: &impl OpenMlsCrypto,
         sender_context: Option<SenderContext>,
         protocol_version: ProtocolVersion,
+        lifetime_validation: LeafNodeLifetimeValidation,
     ) -> Result<FramedContent, ValidationError> {
         Ok(FramedContent {
             group_id: self.group_id,
             epoch: self.epoch,
             sender: self.sender,
             authenticated_data: self.authenticated_data,
-            body: self
-                .body
-                .validate(ciphersuite, crypto, sender_context, protocol_version)?,
+            body: self.body.validate_with_lifetime_validation(
+                ciphersuite,
+                crypto,
+                sender_context,
+                protocol_version,
+                lifetime_validation,
+            )?,
         })
     }
 }
@@ -145,28 +149,37 @@ impl FramedContentBodyIn {
         })
     }
 
-    /// Returns a [`FramedContentBody`] after successful validation.
-    pub(crate) fn validate(
+    pub(crate) fn validate_with_lifetime_validation(
         self,
         ciphersuite: Ciphersuite,
         crypto: &impl OpenMlsCrypto,
         sender_context: Option<SenderContext>,
         protocol_version: ProtocolVersion,
+        lifetime_validation: LeafNodeLifetimeValidation,
     ) -> Result<FramedContentBody, ValidationError> {
         Ok(match self {
             FramedContentBodyIn::Application(bytes) => FramedContentBody::Application(bytes),
-            FramedContentBodyIn::Proposal(proposal_in) => FramedContentBody::Proposal(
-                proposal_in.validate(crypto, ciphersuite, sender_context, protocol_version)?,
-            ),
+            FramedContentBodyIn::Proposal(proposal_in) => {
+                FramedContentBody::Proposal(proposal_in.validate_with_lifetime_validation(
+                    crypto,
+                    ciphersuite,
+                    sender_context,
+                    protocol_version,
+                    lifetime_validation,
+                )?)
+            }
             FramedContentBodyIn::Commit(commit_in) => {
                 let sender_context = sender_context
                     .ok_or_else(|| LibraryError::custom("Forgot the commit sender context"))?;
-                FramedContentBody::Commit(Box::new(commit_in.validate(
-                    ciphersuite,
-                    crypto,
-                    sender_context,
-                    protocol_version,
-                )?))
+                FramedContentBody::Commit(Box::new(
+                    commit_in.validate_with_lifetime_validation(
+                        ciphersuite,
+                        crypto,
+                        sender_context,
+                        protocol_version,
+                        lifetime_validation,
+                    )?,
+                ))
             }
         })
     }

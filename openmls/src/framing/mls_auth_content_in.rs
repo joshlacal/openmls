@@ -16,7 +16,7 @@ use super::{mls_auth_content::*, mls_content_in::*, *};
 use crate::{
     ciphersuite::signable::{SignedStruct, Verifiable, VerifiedStruct},
     credentials::CredentialWithKey,
-    group::errors::ValidationError,
+    group::{creation::LeafNodeLifetimeValidation, errors::ValidationError},
     messages::proposals_in::ProposalIn,
     versions::ProtocolVersion,
 };
@@ -43,21 +43,22 @@ pub(crate) struct AuthenticatedContentIn {
 }
 
 impl AuthenticatedContentIn {
-    /// Returns a [`AuthenticatedContent`] after successful validation.
-    pub(crate) fn validate(
+    pub(crate) fn validate_with_lifetime_validation(
         self,
         ciphersuite: Ciphersuite,
         crypto: &impl OpenMlsCrypto,
         sender_context: Option<SenderContext>,
         protocol_version: ProtocolVersion,
+        lifetime_validation: LeafNodeLifetimeValidation,
     ) -> Result<AuthenticatedContent, ValidationError> {
         Ok(AuthenticatedContent {
             wire_format: self.wire_format,
-            content: self.content.validate(
+            content: self.content.validate_with_lifetime_validation(
                 ciphersuite,
                 crypto,
                 sender_context,
                 protocol_version,
+                lifetime_validation,
             )?,
             auth: self.auth,
         })

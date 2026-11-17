@@ -35,6 +35,9 @@ use crate::{
 #[cfg(feature = "extensions-draft")]
 use std::collections::BTreeMap;
 
+#[cfg(feature = "extensions-draft")]
+use super::creation::LeafNodeLifetimeValidation;
+
 use super::{errors::ProcessMessageError, *};
 
 /// Result of unprotecting an inbound message.
@@ -167,6 +170,9 @@ pub struct UnresolvedAppDataCommit {
     /// by reference already resolved from the proposal store, sorted by
     /// component id.
     proposals: Vec<AppDataUpdateProposal>,
+    /// The lifetime validation mode used when the commit was processed. It
+    /// must also be used when deferred staging resumes.
+    lifetime_validation: LeafNodeLifetimeValidation,
     #[cfg(feature = "virtual-clients-draft")]
     vc_commit_material: Option<crate::components::vc_derivation_info::VcCommitMaterial>,
 }
@@ -179,13 +185,20 @@ impl UnresolvedAppDataCommit {
     pub(crate) fn new(
         content: AuthenticatedContent,
         proposals: Vec<AppDataUpdateProposal>,
+        lifetime_validation: LeafNodeLifetimeValidation,
     ) -> Self {
         Self {
             content,
             proposals,
+            lifetime_validation,
             #[cfg(feature = "virtual-clients-draft")]
             vc_commit_material: None,
         }
+    }
+
+    /// Returns the lifetime validation mode used when processing this commit.
+    pub(crate) fn lifetime_validation(&self) -> LeafNodeLifetimeValidation {
+        self.lifetime_validation
     }
 
     /// Consumes the commit and returns the verified [`AuthenticatedContent`],
@@ -979,6 +992,7 @@ impl MlsGroup {
                         let unresolved_commit = UnresolvedAppDataCommit {
                             content,
                             proposals: app_data_update_proposals,
+                            lifetime_validation: LeafNodeLifetimeValidation::Current,
                             #[cfg(feature = "virtual-clients-draft")]
                             vc_commit_material,
                         };

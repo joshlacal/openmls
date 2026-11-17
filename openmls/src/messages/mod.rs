@@ -19,7 +19,7 @@ use crate::{
     credentials::CredentialWithKey,
     error::LibraryError,
     framing::SenderContext,
-    group::errors::ValidationError,
+    group::{creation::LeafNodeLifetimeValidation, errors::ValidationError},
     schedule::{psk::PreSharedKeyId, JoinerSecret},
     treesync::{
         node::{
@@ -230,18 +230,25 @@ impl CommitIn {
         })
     }
 
-    /// Returns a [`Commit`] after successful validation.
-    pub(crate) fn validate(
+    pub(crate) fn validate_with_lifetime_validation(
         self,
         ciphersuite: Ciphersuite,
         crypto: &impl OpenMlsCrypto,
         sender_context: SenderContext,
         protocol_version: ProtocolVersion,
+        lifetime_validation: LeafNodeLifetimeValidation,
     ) -> Result<Commit, ValidationError> {
         let proposals = self
             .proposals
             .into_iter()
-            .map(|p| p.validate(crypto, ciphersuite, protocol_version))
+            .map(|proposal| {
+                proposal.validate_with_lifetime_validation(
+                    crypto,
+                    ciphersuite,
+                    protocol_version,
+                    lifetime_validation,
+                )
+            })
             .collect::<Result<Vec<_>, _>>()?;
 
         let path = if let Some(path) = self.path {

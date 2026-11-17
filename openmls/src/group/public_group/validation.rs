@@ -373,6 +373,17 @@ impl PublicGroup {
         &self,
         proposal_queue: &ProposalQueue,
     ) -> Result<(), ProposalValidationError> {
+        self.validate_add_proposals_with_lifetime_validation(
+            proposal_queue,
+            LeafNodeLifetimeValidation::Current,
+        )
+    }
+
+    pub(crate) fn validate_add_proposals_with_lifetime_validation(
+        &self,
+        proposal_queue: &ProposalQueue,
+        lifetime_validation: LeafNodeLifetimeValidation,
+    ) -> Result<(), ProposalValidationError> {
         let add_proposals = proposal_queue.add_proposals();
 
         // We do the key package validation checks here inline
@@ -402,7 +413,10 @@ impl PublicGroup {
             }
 
             // https://validation.openmls.tech/#valn0202
-            self.validate_leaf_node(add_proposal.add_proposal().key_package().leaf_node())?;
+            self.validate_leaf_node_inner(
+                add_proposal.add_proposal().key_package().leaf_node(),
+                lifetime_validation,
+            )?;
         }
         Ok(())
     }

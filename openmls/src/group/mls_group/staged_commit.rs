@@ -5,6 +5,7 @@ use openmls_traits::storage::StorageProvider as _;
 use serde::{Deserialize, Serialize};
 use tls_codec::Serialize as _;
 
+use super::creation::LeafNodeLifetimeValidation;
 use super::proposal_store::{
     QueuedAddProposal, QueuedPskProposal, QueuedRemoveProposal, QueuedUpdateProposal,
 };
@@ -229,7 +230,11 @@ impl MlsGroup {
     ) -> Result<StagedCommit, StageCommitError> {
         let (commit, proposal_queue, sender_index) = self
             .public_group
-            .validate_commit(mls_content, provider.crypto())?;
+            .validate_commit(
+                mls_content,
+                provider.crypto(),
+                LeafNodeLifetimeValidation::Current,
+            )?;
 
         // Create the provisional public group state (including the tree and
         // group context) and apply proposals.
@@ -275,7 +280,11 @@ impl MlsGroup {
     ) -> Result<StagedCommit, StageCommitError> {
         let (commit, proposal_queue, sender_index) = self
             .public_group
-            .validate_commit(mls_content, provider.crypto())?;
+            .validate_commit(
+                mls_content,
+                provider.crypto(),
+                LeafNodeLifetimeValidation::Current,
+            )?;
 
         // Create the provisional public group state (including the tree and
         // group context) and apply proposals.

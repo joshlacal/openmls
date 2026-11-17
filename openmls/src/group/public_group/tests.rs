@@ -684,6 +684,110 @@ fn public_group_external_import_uses_explicit_trusted_time() {
     }
 }
 
+#[openmls_test::openmls_test]
+fn public_group_message_processing_uses_explicit_trusted_time_for_adds() {
+    use crate::key_packages::{KeyPackage, Lifetime, UnixSeconds};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    let alice_provider = &Provider::default();
+    let bob_provider = &Provider::default();
+    let public_provider = &Provider::default();
+    let (alice_credential, _alice_kpb, alice_signer, _alice_pk) =
+        setup_client("Alice", ciphersuite, alice_provider);
+    let (bob_credential, _bob_kpb, bob_signer, _bob_pk) =
+        setup_client("Bob", ciphersuite, bob_provider);
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system clock after Unix epoch")
+        .as_secs();
+    let not_before = now.saturating_sub(60);
+    let not_after = now.checked_add(3_600).expect("test lifetime");
+
+    let config = MlsGroupCreateConfig::builder()
+        .wire_format_policy(PURE_PLAINTEXT_WIRE_FORMAT_POLICY)
+        .ciphersuite(ciphersuite)
+        .build();
+    let mut alice_group = MlsGroup::new_with_group_id(
+        alice_provider,
+        &alice_signer,
+        &config,
+        GroupId::from_slice(b"Trusted Message Time Group"),
+        alice_credential,
+    )
+    .expect("create group");
+
+    let group_info = alice_group
+        .export_group_info(alice_provider.crypto(), &alice_signer, false)
+        .expect("export group info")
+        .into_verifiable_group_info()
+        .expect("convert group info");
+    let (public_group, _) = PublicGroup::from_external(
+        public_provider.crypto(),
+        public_provider.storage(),
+        alice_group.export_ratchet_tree().into(),
+        group_info,
+        ProposalStore::new(),
+    )
+    .expect("create public observer");
+
+    let bob_key_package = KeyPackage::builder()
+        .key_package_lifetime(Lifetime::init(not_before, not_after))
+        .build(
+            ciphersuite,
+            bob_provider,
+            &bob_signer,
+            bob_credential,
+        )
+        .expect("build current Bob KeyPackage")
+        .key_package()
+        .clone();
+    let (commit, _, _) = alice_group
+        .add_members(
+            alice_provider,
+            &alice_signer,
+            core::slice::from_ref(&bob_key_package),
+        )
+        .expect("build Add Commit");
+    let public_commit = into_public_message(commit);
+
+    assert!(
+        public_group
+            .process_message(public_provider.crypto(), public_commit.clone())
+            .is_ok(),
+        "default processing must accept the currently valid KeyPackage"
+    );
+
+    let processed = public_group
+        .process_message_at(
+            public_provider.crypto(),
+            public_commit.clone(),
+            UnixSeconds::new(now),
+        )
+        .expect("trusted instant inside the signed lifetime must be authoritative");
+    assert!(matches!(
+        processed.into_content(),
+        ProcessedMessageContent::StagedCommitMessage(_)
+    ));
+
+    for instant in [
+        not_before.saturating_sub(1),
+        not_before,
+        not_after,
+        not_after.checked_add(1).expect("test boundary"),
+    ] {
+        assert!(
+            public_group
+                .process_message_at(
+                    public_provider.crypto(),
+                    public_commit.clone(),
+                    UnixSeconds::new(instant),
+                )
+                .is_err(),
+            "trusted instant {instant} outside the open lifetime must reject"
+        );
+    }
+}
+
 #[derive(Default)]
 struct FailingPublicStorage;
 
