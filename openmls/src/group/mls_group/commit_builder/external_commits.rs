@@ -241,6 +241,7 @@ impl ExternalCommitBuilder {
                 ciphersuite,
                 provider.crypto(),
                 ProtocolVersion::default(),
+                LeafNodeLifetimePolicy::Verify,
             )?;
             let queued_proposal = QueuedProposal::from_authenticated_content(
                 ciphersuite,

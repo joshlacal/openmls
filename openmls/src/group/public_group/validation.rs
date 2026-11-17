@@ -372,6 +372,7 @@ impl PublicGroup {
     pub(crate) fn validate_add_proposals(
         &self,
         proposal_queue: &ProposalQueue,
+        lifetime_policy: LeafNodeLifetimePolicy,
     ) -> Result<(), ProposalValidationError> {
         let add_proposals = proposal_queue.add_proposals();
 
@@ -402,7 +403,10 @@ impl PublicGroup {
             }
 
             // https://validation.openmls.tech/#valn0202
-            self.validate_leaf_node(add_proposal.add_proposal().key_package().leaf_node())?;
+            self.validate_leaf_node_inner(
+                add_proposal.add_proposal().key_package().leaf_node(),
+                lifetime_policy,
+            )?;
         }
         Ok(())
     }
@@ -849,13 +853,11 @@ impl PublicGroup {
         self.validate_leaf_node_inner(leaf_node, LeafNodeLifetimePolicy::Verify)
     }
 
-    /// Validate a leaf node.
-    ///
-    /// This may skip checking the lifetime when validating a ratchet tree.
+    /// Validate a leaf node under `lifetime_policy`.
     pub(crate) fn validate_leaf_node_inner(
         &self,
         leaf_node: &crate::treesync::LeafNode,
-        validate_lifetimes: LeafNodeLifetimePolicy,
+        lifetime_policy: LeafNodeLifetimePolicy,
     ) -> Result<(), LeafNodeValidationError> {
         // https://validation.openmls.tech/#valn0103
         // https://validation.openmls.tech/#valn0104
@@ -879,11 +881,9 @@ impl PublicGroup {
         //
         // Some KATs use key packages that are expired by now. In order to run these tests, we
         // provide a way to turn off this check.
-        if matches!(validate_lifetimes, LeafNodeLifetimePolicy::Verify)
-            && !crate::skip_validation::is_disabled::leaf_node_lifetime()
-        {
+        if !crate::skip_validation::is_disabled::leaf_node_lifetime() {
             if let Some(lifetime) = leaf_node.life_time() {
-                lifetime.validate()?;
+                lifetime.validate_with_policy(lifetime_policy)?;
             }
         }
 

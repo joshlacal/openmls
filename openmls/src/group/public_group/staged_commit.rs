@@ -50,6 +50,7 @@ impl PublicGroup {
         &self,
         mls_content: &'a AuthenticatedContent,
         crypto: &impl OpenMlsCrypto,
+        lifetime_policy: LeafNodeLifetimePolicy,
     ) -> Result<(&'a Commit, ProposalQueue, LeafNodeIndex), StageCommitError> {
         let ciphersuite = self.ciphersuite();
 
@@ -173,7 +174,7 @@ impl PublicGroup {
         // ValSem104
         self.validate_key_uniqueness(&proposal_queue, Some(commit))?;
         // ValSem105
-        self.validate_add_proposals(&proposal_queue)?;
+        self.validate_add_proposals(&proposal_queue, lifetime_policy)?;
         // ValSem106
         // ValSem109
         self.validate_capabilities(&proposal_queue)?;
@@ -291,7 +292,8 @@ impl PublicGroup {
         mls_content: &AuthenticatedContent,
         crypto: &impl OpenMlsCrypto,
     ) -> Result<StagedCommit, StageCommitError> {
-        let (commit, proposal_queue, sender_index) = self.validate_commit(mls_content, crypto)?;
+        let (commit, proposal_queue, sender_index) =
+            self.validate_commit(mls_content, crypto, LeafNodeLifetimePolicy::Verify)?;
 
         let staged_diff = self.stage_diff(mls_content, &proposal_queue, sender_index, crypto)?;
         let staged_state = PublicStagedCommitState {
@@ -316,7 +318,8 @@ impl PublicGroup {
         crypto: &impl OpenMlsCrypto,
         app_data_dict_updates: Option<AppDataUpdates>,
     ) -> Result<StagedCommit, StageCommitError> {
-        let (commit, proposal_queue, sender_index) = self.validate_commit(mls_content, crypto)?;
+        let (commit, proposal_queue, sender_index) =
+            self.validate_commit(mls_content, crypto, LeafNodeLifetimePolicy::Verify)?;
 
         let staged_diff = self.stage_diff_with_app_data_updates(
             mls_content,

@@ -1026,7 +1026,14 @@ impl MlsGroup {
         if material.epoch_id != epoch_id {
             return Err(Error::EpochIdMismatch);
         }
-        let staged = group.stage_commit(&content, vec![], vec![], provider, Some(material))?;
+        let staged = group.stage_commit(
+            &content,
+            vec![],
+            vec![],
+            provider,
+            LeafNodeLifetimePolicy::Verify,
+            Some(material),
+        )?;
         group.merge_staged_commit(provider, staged)?;
         group.resize_message_secrets_store(join_config.past_epoch_deletion_policy());
         group
@@ -1257,18 +1264,19 @@ impl MlsGroup {
     }
 }
 
-/// Verify or skip the validation of leaf node lifetimes in the ratchet tree
-/// when joining a group.
+/// How the lifetime of a leaf node is checked.
 #[derive(Default, Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum LeafNodeLifetimePolicy {
-    /// Verify the lifetime of leaf nodes in the ratchet tree.
-    ///
-    /// **NOTE:** Only leaf nodes that have never been updated have a lifetime.
+    /// Check the lifetime against the current time.
     #[default]
     Verify,
 
-    /// Skip the verification of the lifeimte in leaf nodes in the ratchet tree.
+    /// Do not check the lifetime.
     Skip,
+
+    /// Check the lifetime against the given time, in seconds since the Unix
+    /// epoch, instead of the current time.
+    VerifyAt(u64),
 }
 
 /// Builder for joining a group.
